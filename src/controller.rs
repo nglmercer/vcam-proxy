@@ -65,7 +65,15 @@ pub fn run(
             break;
         }
 
-        let desired_devices = current_cfg.devices.clamp(1, 8);
+        let desired_devices = effective_devices(&current_cfg);
+        if desired_devices > current_cfg.devices.clamp(1, 8) {
+            info!(
+                configured = current_cfg.devices,
+                effective = desired_devices,
+                "multi-reader: creating one virtual camera per app \
+                 (v4l2loopback ≥ 0.14 allows only one reader per node)"
+            );
+        }
         let module_params = messages::module_params(
             current_cfg.exclusive_caps,
             desired_devices,
@@ -167,6 +175,28 @@ pub fn run(
     info!("{}", messages::LOG_THREADS_STOPPED);
 }
 
+/// Effective number of loopback nodes to create/feed.
+///
+/// v4l2loopback ≥ 0.14 grants the CAPTURE stream token to a **single** opener
+/// per node: only ONE app can stream from a node at a time — every additional
+/// app fails with EBUSY ("Device or resource busy"), which is exactly the
+/// reported "OBS / browser can't access the virtual camera while another app
+/// uses it" symptom. `max_openers` only caps open *fds*, not *streams*.
+///
+/// Multi-app support therefore means **one node per app**: when `multi_reader`
+/// is on, always create at least 2 nodes ('vcam-proxy', 'vcam-proxy-2', …) so
+/// OBS, a browser, Zoom, … can each be assigned their own virtual camera.
+/// (On drivers ≤ 0.13 the extra node is unused-but-harmless: those releases
+/// broadcast to any number of readers on a single node.)
+fn effective_devices(cfg: &ResolvedConfig) -> u32 {
+    let desired = cfg.devices.clamp(1, 8);
+    if cfg.multi_reader && desired < 2 {
+        2
+    } else {
+        desired
+    }
+}
+
 fn ensure_module(cfg: &ResolvedConfig, module_params: &str) {
     if sink::is_module_loaded() {
         match sink::exclusive_caps_active() {
@@ -175,11 +205,26 @@ fn ensure_module(cfg: &ResolvedConfig, module_params: &str) {
             None => {}
         }
 
-        // Check max_openers for multi-reader support. If the module was
-        // loaded by a previous run or the user with a low max_openers, only
-        // one app can read the virtual camera at a time — the exact symptom
-        // "OBS works but vcam-proxy doesn't for multiple apps".
         if cfg.multi_reader {
+            // Report the driver's per-node reader model: on v4l2loopback
+            // ≥ 0.14 a single node serves only ONE streaming app, which is
+            // why multi-reader feeds one node per app (see effective_devices).
+            match sink::capture_single_streamer() {
+                Some(true) => info!(
+                    version = ?sink::module_version(),
+                    "v4l2loopback ≥ 0.14 allows only ONE reader per node; \
+                     multi-reader feeds one virtual camera per app"
+                ),
+                Some(false) => info!(
+                    version = ?sink::module_version(),
+                    "v4l2loopback ≤ 0.13 supports multiple concurrent readers per node"
+                ),
+                None => {}
+            }
+
+            // Check max_openers for multi-reader support. If the module was
+            // loaded by a previous run or the user with a low max_openers,
+            // apps can't even OPEN the virtual camera concurrently.
             if let Some(max) = sink::max_openers() {
                 if max < 2 {
                     warn!(

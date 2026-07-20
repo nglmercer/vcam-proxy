@@ -56,7 +56,7 @@ buffers = 4
 format = "auto"
 retry_ms = 1000
 multi_reader = true
-devices = 1
+devices = 1                 # nodes to feed; multi_reader auto-raises this to >= 2
 exclusive_caps = 1
 timeout = 0                 # 0 = keep last frame (no green reconnect flash)
 auto_load_module = true     # pkexec modprobe when module missing
@@ -65,12 +65,19 @@ auto_resolution = true      # use camera's highest mode
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `multi_reader` | `true` | Several apps can open the virtual cam at once (OBS-style persistent output) |
+| `multi_reader` | `true` | Several apps can use the virtual cam at once — feeds **one node per app** (see below) |
+| `devices` | `1` | Loopback nodes to create/feed; `multi_reader = true` auto-raises to ≥ 2 |
 | `auto_load_module` | `true` | Load/install v4l2loopback automatically |
 | `auto_resolution` | `true` | Prefer max camera mode over `width`/`height` |
-| `exclusive_caps` | `1` | Required for Chrome/Firefox/Zoom to list the device |
+| `exclusive_caps` | `1` | Required for Chrome/Firefox/Zoom to list the device (applied to every node) |
 | `timeout` | `0` | Keep last frame forever (`0`); ms otherwise |
 | `format` | `auto` | Always wires YUYV to consumers |
+
+> **How multi-app works:** v4l2loopback ≥ 0.14 allows only **one streaming reader per
+> device node** — the first app to stream owns the node and every other app gets
+> `EBUSY` ("Device or resource busy"). So vcam-proxy creates one node **per app**:
+> `vcam-proxy` (`/dev/video10`), `vcam-proxy-2` (`/dev/video11`), … Assign each app
+> its own camera name (e.g. OBS → `vcam-proxy`, browser → `vcam-proxy-2`).
 
 Change values in the **Settings** window (tray → Settings…) and click **Save to config** / **Apply & Restart**.
 
@@ -83,7 +90,7 @@ CLI flags are optional overrides only. Prefer the config file.
 - Settings GUI (egui) + system tray (ksni, Wayland-friendly)
 - Persistent `config.toml`
 - Auto-load / auto-install v4l2loopback
-- Multi-reader on one node (`max_openers`)
+- Multi-app support: one labeled virtual camera per app (auto multi-node)
 - Auto-resolution + YUYV output for browsers
 - Camera reconnect recovery
 - Still-image source for tests: `cargo run -- --image path.png --no-gui --no-tray`
@@ -93,10 +100,14 @@ CLI flags are optional overrides only. Prefer the config file.
 ## Manual module load (if you disable auto_load)
 
 ```bash
-sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1 video_nr=10
+# Single node:
+sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1 video_nr=10 max_openers=16
+
+# Multi-app (one node per app) — note the per-node arrays:
+sudo modprobe v4l2loopback exclusive_caps=1,1 card_label=vcam-proxy,vcam-proxy-2 devices=2 video_nr=10,11 max_openers=16
 
 # Persist at boot
-echo 'options v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1 video_nr=10' \
+echo 'options v4l2loopback exclusive_caps=1,1 card_label=vcam-proxy,vcam-proxy-2 devices=2 video_nr=10,11 max_openers=16' \
   | sudo tee /etc/modprobe.d/v4l2loopback.conf
 echo 'v4l2loopback' | sudo tee /etc/modules-load.d/v4l2loopback.conf
 ```
@@ -131,25 +142,43 @@ cargo test --test pixel_integrity multi_reader_pixel_integrity -- --ignored --no
 | No virtual device | Ensure `auto_load_module = true`, approve pkexec, or `sudo modprobe v4l2loopback …` |
 | Permission denied | `sudo usermod -aG video $USER` then re-login |
 | Not listed in Chrome/Zoom | `exclusive_caps = 1` (reload module if it was loaded with `0`) |
-| Second app can't open the camera | Reload module with `max_openers=16`: `sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback exclusive_caps=1 max_openers=16 devices=1 video_nr=10` |
+| Second app says "Device or resource busy" | Driver ≥ 0.14 allows only **one reader per node**. Keep `multi_reader = true`, close all camera apps once so the module can reload with 2 nodes, then assign each app its own camera (`vcam-proxy`, `vcam-proxy-2`). More apps: set `devices = 3+` |
 | Green blink / reconnect flash | Fixed in current builds; keep `timeout = 0` |
 | `cargo run` asks which binary | Fixed via `default-run = "vcam-proxy"` — use plain `cargo run` |
 
-### Why multiple apps couldn't read the virtual camera (fixed)
+### Why a second app couldn't use the virtual camera (fixed)
 
-Previously, vcam-proxy re-opened the v4l2loopback OUTPUT device on **every** transient write error
-and on **every** pixel-format change. Each re-open calls `VIDIOC_S_FMT` + toggles `keep_format`,
-which tears down all attached CAPTURE clients (OBS, Chrome, Zoom) — so a second app trying to
-open the camera while the first was streaming would fail or disconnect the first.
+Two separate bugs caused the "OBS / browser can't access the virtual camera" symptom:
 
-OBS avoids this by opening its output fd **once** and writing forever. vcam-proxy now does the same:
+**1. The writer disrupted attached readers (fixed earlier).**
+vcam-proxy used to re-open the v4l2loopback OUTPUT device on every transient write error and
+every pixel-format change. Each re-open calls `VIDIOC_S_FMT` + toggles `keep_format`, which tears
+down all attached CAPTURE clients. Like OBS's virtual camera, vcam-proxy now opens the OUTPUT fd
+**once** and writes forever:
 
 - The OUTPUT fd is opened on the first frame and kept alive across transient errors.
 - The device is only re-opened after **60 consecutive** write failures (~2s at 30fps), which
   only happens when the device is truly gone (module unloaded, node removed).
 - Back-pressure (`WouldBlock`/`TimedOut` — no reader draining) never triggers a re-open.
-- The `max_openers` module parameter is checked at startup and a warning is logged if it's
-  too low for multi-reader mode.
+
+**2. The kernel driver allows only ONE reader per node (fixed by multi-node).**
+v4l2loopback ≥ 0.14 hands the CAPTURE stream token to a **single** opener per device node —
+the first app to stream owns it, and every additional app fails `VIDIOC_REQBUFS` with
+`EBUSY` ("Device or resource busy"). `max_openers` only limits open *file descriptors*,
+not *streams*, so it cannot help. (Releases ≤ 0.13 broadcast to many readers on one node —
+that is the behaviour OBS's virtual camera appeared to have.)
+
+Userspace cannot negotiate around this, so vcam-proxy now does the only thing that works on
+modern drivers: **feed one labeled node per app**. With `multi_reader = true` it automatically
+creates at least 2 nodes and writes every frame to all of them. Each app is then assigned its
+own camera by name (`vcam-proxy`, `vcam-proxy-2`, …) and gets an exclusive, full-rate stream.
+
+- Per-node `exclusive_caps` and `card_label` arrays are set correctly (a scalar used to leave
+  extra nodes browser-invisible and nameless).
+- The invalid `timeout` module parameter is no longer passed to `modprobe` (it is an ioctl
+  control, still applied at runtime).
+- Reloading the module requires **all camera apps closed** (`modprobe -r` fails while the
+  device is busy); vcam-proxy detects this and tells you.
 
 ---
 
@@ -161,10 +190,12 @@ Physical camera (/dev/video0)
         ▼
   capture thread  →  BufferPool / channel  →  sink thread
                                                    │
-                                                   ▼
-                                         v4l2loopback (/dev/video10)
-                                                   │
-                                    Chrome / Zoom / OBS / …
+                              ┌────────────────────┼────────────────────┐
+                              ▼                    ▼                    ▼
+                     v4l2loopback video10   video11 ("vcam-proxy-2")   …
+                     ("vcam-proxy")              │
+                        OBS                    Chrome / Zoom / …
+                    (one app per node — driver ≥ 0.14 allows only one reader per node)
 ```
 
 Tray + Settings GUI share the live on/off switch and config with the pipeline.

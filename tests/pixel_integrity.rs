@@ -10,8 +10,9 @@
 //! cargo test -p vcam-proxy --test pixel_integrity -- --ignored --nocapture
 //! ```
 //!
-//! Close browser/Zoom previews of the virtual camera first — an exclusive
-//! open from another app will make multi-reader grabs fail with EBUSY.
+//! Close browser/Zoom previews of the virtual camera first — on v4l2loopback
+//! ≥ 0.14 the CAPTURE stream token belongs to a single opener, so another
+//! streaming app makes concurrent grabs on the same node fail with EBUSY.
 
 #![cfg(target_os = "linux")]
 

@@ -56,10 +56,14 @@ pub struct Settings {
     /// Backoff between camera re-open attempts (ms).
     #[serde(default = "default_retry_ms")]
     pub retry_ms: u64,
-    /// Allow multiple apps to read the virtual camera at the same time.
+    /// Allow multiple apps to use the virtual camera at the same time.
+    /// v4l2loopback ≥ 0.14 grants only ONE streaming reader per device node,
+    /// so multi-app support feeds one node per app (see `devices`).
     #[serde(default = "default_true")]
     pub multi_reader: bool,
     /// Number of v4l2loopback device nodes to feed (1 = single node).
+    /// With `multi_reader = true` at least 2 nodes are created automatically
+    /// ('vcam-proxy', 'vcam-proxy-2', …) — assign each app its own camera.
     #[serde(default = "default_devices")]
     pub devices: u32,
     /// v4l2loopback exclusive_caps (1 = browser-compatible).

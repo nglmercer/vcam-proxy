@@ -5,8 +5,11 @@
 use std::path::Path;
 
 /// Default `modprobe` argument string when no ResolvedConfig is available yet.
+///
+/// NOTE: `timeout` is intentionally absent — it is not a v4l2loopback module
+/// parameter on driver ≥ 0.14 (only a runtime control, which we set via ioctl).
 pub const DEFAULT_MODULE_PARAMS: &str = "exclusive_caps=1 card_label=vcam-proxy devices=1 \
-video_nr=10 max_buffers=4 max_openers=16 timeout=0";
+video_nr=10 max_buffers=4 max_openers=16";
 
 pub const MODPROBE_HINT: &str =
     "sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1 video_nr=10";
@@ -88,9 +91,10 @@ pub fn note_manual_modprobe(module_params: &str) {
 
 pub fn note_multi_node_reload(desired: u32, current: usize) {
     eprintln!(
-        "Multi-node mode needs {desired} virtual cameras but only {current} exist.\n\
+        "Multi-app mode needs {desired} virtual cameras but only {current} exist.\n\
          Reloading v4l2loopback (devices={desired})...\n\
-         Apps using the virtual camera must re-open it afterwards.\n\
+         NOTE: the reload only succeeds while NO app is using the virtual camera\n\
+         (modprobe -r fails on a busy device). Close camera apps if it fails.\n\
          (A polkit authentication dialog may appear)"
     );
 }
@@ -111,15 +115,17 @@ pub fn warn_multi_node_partial(found: usize, module_params: &str) {
 
 pub fn error_multi_node_reload(err: &impl std::fmt::Display, module_params: &str) {
     eprintln!(
-        "ERROR: Could not reload v4l2loopback for multi-node mode: {err}\n\
+        "ERROR: Could not reload v4l2loopback for multi-app mode: {err}\n\
          \n\
-         Continuing with the existing node(s) — multiple apps can still\n\
-         share ONE node (native multi-reader). For manual setup:\n\
+         Continuing with the existing single node. Note: on v4l2loopback ≥ 0.14\n\
+         only ONE app can stream from it at a time — the second app gets\n\
+         \"Device or resource busy\". To enable multi-app support, CLOSE every\n\
+         app using the virtual camera, then either restart vcam-proxy or run:\n\
          \n\
            sudo modprobe -r v4l2loopback\n\
            sudo modprobe v4l2loopback {module_params}\n\
          \n\
-         Then restart vcam-proxy."
+         Then assign each app its own camera ('vcam-proxy', 'vcam-proxy-2', …)."
     );
 }
 
@@ -157,17 +163,23 @@ pub fn error_device_access(path: &Path, err: &impl std::fmt::Display) {
 }
 
 pub fn note_multi_node_active(count: usize, paths: &[impl AsRef<Path>]) {
-    eprintln!("✓ Multi-node mode active: writing to {count} virtual cameras");
+    eprintln!("✓ Multi-app mode active: feeding {count} virtual cameras (assign one per app):");
     for (i, p) in paths.iter().enumerate() {
-        eprintln!("  App {} can open: {}", i + 1, p.as_ref().display());
+        eprintln!(
+            "  App {} → '{}' ({})",
+            i + 1,
+            card_label(i as u32),
+            p.as_ref().display()
+        );
     }
 }
 
 pub fn warn_multi_node_fallback(desired: u32, module_params: &str) {
     eprintln!(
-        "\n⚠ Multi-node mode requested ({desired}) but only 1 virtual camera found.\n\
-           Falling back to a single node — multiple apps can still share it.\n\
-           To create more nodes:\n\
+        "\n⚠ Multi-app mode requested ({desired} nodes) but only 1 virtual camera exists.\n\
+           On v4l2loopback ≥ 0.14 a single node can only serve ONE app at a time\n\
+           (the second app gets \"Device or resource busy\"). To create more nodes,\n\
+           CLOSE every app using the virtual camera, then reload the module:\n\
          \n\
              sudo modprobe -r v4l2loopback\n\
              sudo modprobe v4l2loopback {module_params}\n"
@@ -215,13 +227,95 @@ pub fn print_setup_fail() {
     println!("        After fixing, run this command again to verify.");
 }
 
+/// Base card label for the first node. Extra nodes get `-2`, `-3`, … suffixes
+/// so users can assign each app its own virtual camera by name.
+pub const CARD_LABEL_BASE: &str = "vcam-proxy";
+
+/// Card label for node `i` (0-based). The first node keeps the historical
+/// plain "vcam-proxy" name so existing app camera selections keep working.
+pub fn card_label(i: u32) -> String {
+    if i == 0 {
+        CARD_LABEL_BASE.to_string()
+    } else {
+        format!("{CARD_LABEL_BASE}-{}", i + 1)
+    }
+}
+
 /// Build the modprobe parameter string from runtime config.
-pub fn module_params(exclusive_caps: u32, devices: u32, timeout: u32) -> String {
+///
+/// Correctness notes for v4l2loopback ≥ 0.14:
+/// - `exclusive_caps` and `card_label` are **per-device arrays**: passing a
+///   scalar only configures the first node, leaving extra nodes invisible to
+///   browsers (`exclusive_caps=N`) and indistinguishable (duplicate labels).
+/// - `timeout` is deliberately NOT passed: it is not a module parameter on
+///   modern v4l2loopback (passing unknown parameters can fail the whole
+///   `modprobe`). The frame timeout is applied at runtime via the `timeout`
+///   ioctl control instead (see `apply_loopback_controls`).
+pub fn module_params(exclusive_caps: u32, devices: u32, _timeout: u32) -> String {
     let devices = devices.clamp(1, 8);
+    let caps: Vec<String> = (0..devices).map(|_| exclusive_caps.to_string()).collect();
+    let labels: Vec<String> = (0..devices).map(card_label).collect();
     let video_nr: Vec<String> = (0..devices).map(|i| (10 + i).to_string()).collect();
     format!(
-        "exclusive_caps={exclusive_caps} card_label=vcam-proxy devices={devices} \
-         video_nr={} max_buffers=4 max_openers=16 timeout={timeout}",
+        "exclusive_caps={} card_label={} devices={devices} \
+         video_nr={} max_buffers=4 max_openers=16",
+        caps.join(","),
+        labels.join(","),
         video_nr.join(",")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn module_params_single_device() {
+        let p = module_params(1, 1, 0);
+        assert!(
+            p.contains("exclusive_caps=1 "),
+            "scalar caps for one node: {p}"
+        );
+        assert!(p.contains("card_label=vcam-proxy "), "plain label: {p}");
+        assert!(p.contains("devices=1"));
+        assert!(p.contains("video_nr=10 "));
+        assert!(p.contains("max_openers=16"));
+    }
+
+    #[test]
+    fn module_params_multi_device_arrays() {
+        let p = module_params(1, 3, 0);
+        // Per-node exclusive_caps, otherwise nodes 2+ are invisible to browsers.
+        assert!(p.contains("exclusive_caps=1,1,1 "), "caps array: {p}");
+        // Distinct labels so each app can be assigned its own node by name.
+        assert!(
+            p.contains("card_label=vcam-proxy,vcam-proxy-2,vcam-proxy-3 "),
+            "label array: {p}"
+        );
+        assert!(p.contains("devices=3"));
+        assert!(p.contains("video_nr=10,11,12 "));
+    }
+
+    #[test]
+    fn module_params_never_emits_timeout_param() {
+        // `timeout` is not a module parameter on v4l2loopback ≥ 0.14; passing
+        // it can fail the whole modprobe on strict kernels.
+        for d in [1, 2, 8] {
+            let p = module_params(1, d, 1000);
+            assert!(!p.contains("timeout"), "no timeout param: {p}");
+        }
+    }
+
+    #[test]
+    fn module_params_clamps_devices() {
+        let p = module_params(1, 99, 0);
+        assert!(p.contains("devices=8"));
+    }
+
+    #[test]
+    fn card_labels_numbered_from_two() {
+        assert_eq!(card_label(0), "vcam-proxy");
+        assert_eq!(card_label(1), "vcam-proxy-2");
+        assert_eq!(card_label(7), "vcam-proxy-8");
+    }
 }
