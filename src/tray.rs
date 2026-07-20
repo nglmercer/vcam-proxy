@@ -8,7 +8,7 @@
 //! Gracefully degrades: if no D-Bus session is available the thread logs and
 //! exits without taking the pipeline down with it.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -42,10 +42,47 @@ impl SinkSwitch {
     }
 }
 
+/// Pipeline statistics snapshot for tray display.
+#[derive(Debug, Clone, Default)]
+pub struct TrayStats {
+    pub captured: Arc<AtomicU64>,
+    pub written: Arc<AtomicU64>,
+    pub dropped: Arc<AtomicU64>,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    #[allow(dead_code)] // reserved for future use
+    pub camera_name: String,
+}
+
+impl TrayStats {
+    pub fn new(width: u32, height: u32, fps: u32) -> Self {
+        Self {
+            captured: Arc::new(AtomicU64::new(0)),
+            written: Arc::new(AtomicU64::new(0)),
+            dropped: Arc::new(AtomicU64::new(0)),
+            width,
+            height,
+            fps,
+            camera_name: String::new(),
+        }
+    }
+
+    pub fn snapshot(&self) -> (u64, u64, u64) {
+        (
+            self.captured.load(Ordering::Relaxed),
+            self.written.load(Ordering::Relaxed),
+            self.dropped.load(Ordering::Relaxed),
+        )
+    }
+}
+
 /// One tray instance: owns the menu, the icons, and the switch + shutdown refs.
 struct VcamTray {
     sink_switch: SinkSwitch,
     shutdown: Shutdown,
+    stats: TrayStats,
+    config_path: String,
 }
 
 impl Tray for VcamTray {
@@ -63,16 +100,51 @@ impl Tray for VcamTray {
     }
 
     fn title(&self) -> String {
-        if self.sink_switch.is_on() {
-            "vcam-proxy — Virtual Camera ON"
+        let status = if self.sink_switch.is_on() {
+            "ON"
         } else {
-            "vcam-proxy — Virtual Camera OFF"
-        }
+            "OFF"
+        };
+        let (captured, written, dropped) = self.stats.snapshot();
+        format!(
+            "vcam-proxy — Camera {status}\n{}×{} @ {}fps\nCaptured: {captured} | Written: {written} | Dropped: {dropped}",
+            self.stats.width, self.stats.height, self.stats.fps
+        )
         .into()
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
+        let (captured, written, dropped) = self.stats.snapshot();
+        let status_text = if self.sink_switch.is_on() {
+            format!("Status: ON ({}×{} @ {}fps)", self.stats.width, self.stats.height, self.stats.fps)
+        } else {
+            format!("Status: OFF ({}×{} @ {}fps)", self.stats.width, self.stats.height, self.stats.fps)
+        };
+
         vec![
+            // Status information (non-clickable)
+            StandardItem {
+                label: status_text.into(),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: format!("Captured: {captured} frames").into(),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: format!("Written: {written} frames").into(),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: format!("Dropped: {dropped} frames").into(),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            // Toggle virtual camera
             StandardItem {
                 label: if self.sink_switch.is_on() {
                     "Turn Virtual Camera OFF"
@@ -94,6 +166,19 @@ impl Tray for VcamTray {
             }
             .into(),
             MenuItem::Separator,
+            // Config file shortcut
+            StandardItem {
+                label: "Open Config File".into(),
+                icon_name: "document-properties".into(),
+                activate: Box::new(|tray: &mut Self| {
+                    info!("opening config file from tray");
+                    let _ = open::that(&tray.config_path);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            // Quit
             StandardItem {
                 label: "Quit".into(),
                 icon_name: "application-exit".into(),
@@ -110,11 +195,21 @@ impl Tray for VcamTray {
 
 /// Spawn the tray on its own thread using ksni blocking API.
 /// Never panics into a pipeline thread — all errors are logged.
-pub fn spawn(sink_switch: SinkSwitch, shutdown: Shutdown) -> Option<thread::JoinHandle<()>> {
+pub fn spawn(
+    sink_switch: SinkSwitch,
+    shutdown: Shutdown,
+    stats: TrayStats,
+) -> Option<thread::JoinHandle<()>> {
+    let config_path = crate::settings::Settings::config_path()
+        .display()
+        .to_string();
+
     let handle = thread::Builder::new().name("tray".into()).spawn(move || {
         let tray = VcamTray {
             sink_switch,
             shutdown,
+            stats,
+            config_path,
         };
         match tray.spawn() {
             Ok(_handle) => {

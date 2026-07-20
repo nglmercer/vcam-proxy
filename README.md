@@ -7,10 +7,13 @@ Captures from a real webcam and streams the frames to a `v4l2loopback` virtual d
 ## Features
 
 - **Zero-copy pipeline**: Frames go camera → kernel-mapped buffer → virtual device (one memcpy per frame)
-- **Tray icon**: Right-click to toggle the virtual camera on/off without stopping capture (uses D-Bus, no GTK)
+- **Tray icon**: Right-click to see the status (captured/written/dropped, resolution, fps), toggle the virtual camera on/off, or open the config file (uses D-Bus, no GTK)
+- **Persistent settings**: Save your preferred camera, resolution, fps, and device settings to `~/.config/vcam-proxy/config.toml`
+- **Multi-reader mode**: Configure v4l2loopback to allow multiple apps to use the virtual camera simultaneously
 - **Auto-detect**: Scans `/dev/video*` for loopback devices, falls back gracefully
 - **Error recovery**: Camera disconnect/reconnect handled transparently
 - **Dry-run mode**: Test capture without a virtual device
+- **Cross-platform**: Linux (v4l2loopback), Windows (named pipe), macOS (capture only)
 
 ---
 
@@ -110,6 +113,55 @@ cargo run --release -- --camera 1 --width 1280 --height 720 --fps 30
 | `--no-tray` | false | Disable system tray icon |
 | `--auto-load-module` | false | Auto-load v4l2loopback via pkexec |
 | `--retry-ms` | 1000 | Backoff between camera re-open attempts |
+| `--multi.Reader` | true | Enable multi-reader virtual camera mode |
+| `--exclusive-caps` | 1 | v4l2loopback exclusive_caps (0 or 1) |
+| `--timeout` | 1000 | v4l2loopback frame timeout in ms |
+| `--save-config` | false | Save current settings to config file |
+| `--edit-config` | false | Open config file in default editor |
+| `--show-config` | false | Show current settings and exit |
+
+---
+
+## Persistent Settings
+
+vcam-proxy stores your preferred settings in `~/.config/vcam-proxy/config.toml`. CLI arguments override file settings.
+
+### Quick Start
+
+```bash
+# Save your preferred settings
+cargo run --release -- --camera 0 --width 1280 --height 720 --fps 30 --save-config
+
+# Edit the config file directly
+cargo run --release -- --edit-config
+
+# Show current effective settings
+cargo run --release -- --show-config
+```
+
+### Config File Example
+
+```toml
+# ~/.config/vcam-proxy/config.toml
+camera = 0
+device = "/dev/video10"
+width = 1280
+height = 720
+fps = 30
+buffers = 4
+format = "auto"
+retry_ms = 1000
+multi_reader = true
+exclusive_caps = 1
+timeout = 1000
+```
+
+### Precedence
+
+Settings are resolved in this order (later overrides earlier):
+1. Built-in defaults
+2. Values from `~/.config/vcam-proxy/config.toml`
+3. CLI arguments
 
 ---
 
@@ -120,11 +172,65 @@ When the tray icon is active (default on Linux desktop):
 - **Left-click icon**: Opens context menu
 - **Right-click icon**: Opens context menu
 - **🎥 Camera icon**: Green = virtual camera ON, Red = OFF
+- **Hover tooltip**: Shows camera status, resolution, fps, and frame statistics
 - **Menu items**:
+  - `Status: ON/OFF (WxH @ Nfps)` — current status display
+  - `Captured: N frames` — total frames captured
+  - `Written: N frames` — total frames written to virtual device
+  - `Dropped: N frames` — total frames dropped (back-pressure or no consumer)
   - `Turn Virtual Camera ON/OFF` — toggles output without restarting capture
+  - `Open Config File` — opens `~/.config/vcam-proxy/config.toml` in your editor
   - `Quit` — stops the application gracefully
 
 To disable the tray icon: `--no-tray`
+
+---
+
+## Multi-Reader Mode (Multiple Apps)
+
+By default, vcam-proxy configures the virtual camera for UVC compatibility (`exclusive_caps=1`), which makes apps like Chrome and Zoom recognize it as a webcam.
+
+**The problem**: some applications open the virtual camera with exclusive access, preventing other apps from using it simultaneously.
+
+### Solution: Multi-Reader Mode
+
+Enable multi-reader mode in your config file:
+
+```toml
+multi_reader = true
+exclusive_caps = 1
+```
+
+Or via CLI:
+
+```bash
+cargo run --release -- --multi-reader --exclusive-caps 1 --save-config
+```
+
+### How It Works
+
+| Mode | `devices` | Behavior |
+|------|-----------|----------|
+| Default | 1 | Single virtual device, first app may get exclusive access |
+| Multi-reader | 2 | Creates 2 isolated device nodes for concurrent access |
+
+> **Note**: The `exclusive_caps=1` parameter is what makes apps recognize the device as a camera. Setting it to `0` may improve multi-app compatibility but some apps won't recognize it as a camera.
+
+### Recommended Kernel Module Configuration
+
+For multi-reader mode:
+
+```bash
+# Single device (default, UVC-compatible)
+sudo modprobe v4l2loopback exclusive_caps=1 card_label="vcam-proxy" devices=1
+
+# Two devices (better multi-app compatibility)
+sudo modprobe v4l2loopback exclusive_caps=1 card_label="vcam-proxy" devices=2
+
+# Persistent configuration
+echo 'options v4l2loopback exclusive_caps=1 card_label="vcam-proxy" devices=2' \
+    | sudo tee /etc/modprobe.d/v4l2loopback.conf
+```
 
 ---
 

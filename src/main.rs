@@ -14,6 +14,7 @@ mod config;
 mod convert;
 mod frame;
 mod pipeline;
+mod settings;
 mod shutdown;
 mod sink;
 mod tray;
@@ -23,13 +24,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use tracing::info;
-use tracing_subscriber::EnvFilter;
-
-use config::Config;
+use config::{Config, ResolvedConfig};
 use frame::BufferPool;
 use pipeline::Stats;
 use shutdown::Shutdown;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -42,22 +42,58 @@ fn main() {
     // etc.) share this same flag so Ctrl+C works consistently.
     let shutdown = Shutdown::install();
 
-    let cfg = Arc::new(Config::parse());
+    let cli = Config::parse();
+    let settings = settings::Settings::load();
 
-    if cfg.list {
+    // Handle --edit-config: open config file in editor, then exit.
+    if cli.edit_config {
+        let path = settings::Settings::config_path();
+        if let Err(e) = settings::Settings::create_default_file() {
+            eprintln!("Failed to create config file: {e}");
+            return;
+        }
+        println!("Opening config file: {}", path.display());
+        let _ = open::that(&path);
+        return;
+    }
+
+    // Handle --show-config: display current settings and exit.
+    if cli.show_config {
+        let resolved = ResolvedConfig::from_cli_and_settings(&cli, &settings);
+        print_settings_table(&resolved, &settings);
+        return;
+    }
+
+    // Handle --save-config: persist current settings, then exit.
+    if cli.save_config {
+        let resolved = ResolvedConfig::from_cli_and_settings(&cli, &settings);
+        match resolved.to_settings().save() {
+            Ok(()) => {
+                let path = settings::Settings::config_path();
+                println!("Settings saved to: {}", path.display());
+            }
+            Err(e) => eprintln!("Failed to save settings: {e}"),
+        }
+        return;
+    }
+
+    // Resolve final config: CLI args override settings file.
+    let cfg = Arc::new(ResolvedConfig::from_cli_and_settings(&cli, &settings));
+
+    if cli.list {
         capture::list_cameras();
         return;
     }
 
     // Handle --list-loopback: enumerate output devices, print, exit.
-    if cfg.list_loopback {
+    if cli.list_loopback {
         list_loopback_devices();
         return;
     }
 
     // Handle --setup: auto-configure system, then exit.
-    if cfg.setup {
-        run_setup(cfg);
+    if cli.setup {
+        run_setup(cfg.clone());
         return;
     }
 
@@ -68,21 +104,32 @@ fn main() {
         fps = cfg.fps,
         format = ?cfg.format,
         buffers = cfg.buffers,
+        multi_reader = cfg.multi_reader,
+        exclusive_caps = cfg.exclusive_caps,
         "starting vcam-proxy"
     );
 
     // Handle dry-run mode: no loopback output, just test capture.
-    if cfg.dry_run {
+    if cli.dry_run {
         info!("dry-run mode: capture only, no virtual camera output");
         return run_dry_run(cfg, shutdown);
     }
 
+    // Build the module parameters based on multi-reader setting.
+    let exclusive_caps = cfg.exclusive_caps;
+    let multi_reader = cfg.multi_reader;
+    let module_params = if multi_reader {
+        format!("exclusive_caps={exclusive_caps} card_label=\"vcam-proxy\" devices=2 timeout={}", cfg.timeout)
+    } else {
+        format!("exclusive_caps={exclusive_caps} card_label=\"vcam-proxy\" devices=1 timeout={}", cfg.timeout)
+    };
+
     // Optionally auto-load the v4l2loopback module via pkexec FIRST,
     // before trying to find a device. This way --auto-load-module has
     // a chance to create the /dev/video* node we need.
-    if cfg.auto_load_module && !sink::is_module_loaded() {
+    if cli.auto_load_module && !sink::is_module_loaded() {
         info!("attempting to auto-load v4l2loopback module");
-        match sink::load_module() {
+        match sink::load_module_with_params(&module_params) {
             Ok(()) => {
                 // Module loaded — give kernel a moment to create device nodes
                 std::thread::sleep(Duration::from_millis(500));
@@ -92,14 +139,14 @@ fn main() {
                 match &e {
                     sink::ModuleError::PkexecNotAvailable => {
                         eprintln!(
-                            "Note: pkexec not available. Run manually:\n  sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1"
+                            "Note: pkexec not available. Run manually:\n  sudo modprobe v4l2loopback {module_params}"
                         );
                     }
                     _ => {
                         eprintln!("Failed to auto-load v4l2loopback module: {e}");
                     }
                 }
-                eprintln!("\nYou can also load it manually:\n  sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1");
+                eprintln!("\nYou can also load it manually:\n  sudo modprobe v4l2loopback {module_params}");
             }
         }
     }
@@ -151,12 +198,13 @@ fn main() {
     let sink_switch = tray::SinkSwitch::new(true);
 
     // Spawn the system-tray icon for on/off toggle (unless disabled).
-    let tray_handle = if cfg.no_tray {
+    let tray_handle = if cli.no_tray {
         info!("tray icon disabled via --no-tray");
         None
     } else {
         // Gracefully continues without a tray if D-Bus is unavailable.
-        tray::spawn(sink_switch.clone(), shutdown.clone())
+        let tray_stats = tray::TrayStats::new(cfg.width, cfg.height, cfg.fps);
+        tray::spawn(sink_switch.clone(), shutdown.clone(), tray_stats)
     };
 
     // Slot size covers the worst wire format (RGB24). Slots grow transparently
@@ -263,7 +311,7 @@ fn list_loopback_devices() {
 
 /// Run in dry-run mode: capture frames but discard them (no loopback output).
 /// Useful for testing camera access without a virtual device.
-fn run_dry_run(cfg: Arc<Config>, shutdown: Shutdown) {
+fn run_dry_run(cfg: Arc<ResolvedConfig>, shutdown: Shutdown) {
     let slot_bytes = cfg.width as usize * cfg.height as usize * 3;
     let pool = BufferPool::new(cfg.buffers, slot_bytes);
     let (tx, rx) = crossbeam_channel::bounded(cfg.buffers);
@@ -319,7 +367,7 @@ fn run_dry_run(cfg: Arc<Config>, shutdown: Shutdown) {
 
 /// Run automatic setup: check system, load module, fix permissions, validate.
 /// Prints actionable guidance and exits.
-fn run_setup(cfg: Arc<Config>) {
+fn run_setup(cfg: Arc<ResolvedConfig>) {
     println!("=== vcam-proxy automatic setup ===\n");
 
     let mut ok = true;
@@ -426,4 +474,26 @@ fn print_permissions_help() {
     println!("          sudo usermod -aG video $USER");
     println!("        → Then LOG OUT and log back in for the group change to take effect.");
     println!("        → Verify with: groups | grep video");
+}
+
+/// Print a formatted table of current settings and their source.
+fn print_settings_table(cfg: &ResolvedConfig, settings: &settings::Settings) {
+    let config_path = settings::Settings::config_path();
+    let sep = "-".repeat(60);
+    println!("Current settings (source: [C]LI / [F]ile / [D]efault):");
+    println!("{}", sep);
+    println!("  {:<20} {:<15} [{:<1}]", "camera", cfg.camera, if cfg.camera != settings.camera { 'C' } else if cfg.camera != 0 { 'F' } else { 'D' });
+    println!("  {:<20} {:<15} [{:<1}]", "device", cfg.device, if cfg.device != settings.device { 'C' } else { 'D' });
+    println!("  {:<20} {:<15} [{:<1}]", "width", cfg.width, if cfg.width != settings.width { 'C' } else if cfg.width != 1280 { 'F' } else { 'D' });
+    println!("  {:<20} {:<15} [{:<1}]", "height", cfg.height, if cfg.height != settings.height { 'C' } else if cfg.height != 720 { 'F' } else { 'D' });
+    println!("  {:<20} {:<15} [{:<1}]", "fps", cfg.fps, if cfg.fps != settings.fps { 'C' } else if cfg.fps != 30 { 'F' } else { 'D' });
+    println!("  {:<20} {:<15} [{:<1}]", "buffers", cfg.buffers, if cfg.buffers != settings.buffers { 'C' } else if cfg.buffers != 4 { 'F' } else { 'D' });
+    println!("  {:<20} {:<15} [{:<1}]", "retry_ms", cfg.retry_ms, if cfg.retry_ms != settings.retry_ms { 'C' } else if cfg.retry_ms != 1000 { 'F' } else { 'D' });
+    println!("  {:<20} {:<15} [{:<1}]", "multi_reader", cfg.multi_reader, if cfg.multi_reader != settings.multi_reader { 'C' } else if settings.multi_reader { 'F' } else { 'D' });
+    println!("  {:<20} {:<15} [{:<1}]", "exclusive_caps", cfg.exclusive_caps, if cfg.exclusive_caps != settings.exclusive_caps { 'C' } else if settings.exclusive_caps != 1 { 'F' } else { 'D' });
+    println!("  {:<20} {:<15} [{:<1}]", "timeout", cfg.timeout, if cfg.timeout != settings.timeout { 'C' } else if settings.timeout != 1000 { 'F' } else { 'D' });
+    println!("{}", sep);
+    println!("\nConfig file: {}", config_path.display());
+    println!("To edit: vcam-proxy --edit-config");
+    println!("To save current settings: vcam-proxy --save-config");
 }

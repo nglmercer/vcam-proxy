@@ -263,6 +263,52 @@ pub fn load_module() -> Result<(), ModuleError> {
     }
 }
 
+/// Load the v4l2loopback kernel module with custom parameters via pkexec.
+/// The `params` string is split on whitespace and passed as arguments to modprobe.
+pub fn load_module_with_params(params: &str) -> Result<(), ModuleError> {
+    if is_module_loaded() {
+        return Ok(());
+    }
+
+    info!("v4l2loopback module not loaded; attempting auto-load via pkexec with params: {params}");
+
+    let args: Vec<&str> = params.split_whitespace().collect();
+    let result = std::process::Command::new("pkexec")
+        .arg("modprobe")
+        .arg("v4l2loopback")
+        .args(&args)
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => {
+            std::thread::sleep(Duration::from_millis(200));
+            if is_module_loaded() {
+                info!("v4l2loopback module loaded successfully");
+                Ok(())
+            } else {
+                Err(ModuleError::LoadFailed {
+                    reason: "modprobe reported success but module not visible in /proc/modules"
+                        .into(),
+                })
+            }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(ModuleError::LoadFailed {
+                reason: format!(
+                    "pkexec modprobe failed (exit {:?}): {}",
+                    output.status.code(),
+                    stderr.trim()
+                ),
+            })
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(ModuleError::PkexecNotAvailable),
+        Err(e) => Err(ModuleError::LoadFailed {
+            reason: e.to_string(),
+        }),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Error types
 // ---------------------------------------------------------------------------

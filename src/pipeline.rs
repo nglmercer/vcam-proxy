@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 use tracing::{info, warn};
 
-use crate::config::Config;
+use crate::config::ResolvedConfig;
 use crate::frame::{BufferPool, Frame};
 use crate::shutdown::Shutdown;
 use crate::sink;
@@ -25,7 +25,7 @@ pub struct Stats {
 }
 
 pub fn spawn_sink(
-    cfg: Arc<Config>,
+    cfg: Arc<ResolvedConfig>,
     loopback_path: PathBuf,
     rx: Receiver<Frame>,
     pool: BufferPool,
@@ -50,7 +50,7 @@ pub fn spawn_sink(
 }
 
 fn run(
-    cfg: &Config,
+    cfg: &ResolvedConfig,
     loopback_path: &Path,
     rx: &Receiver<Frame>,
     pool: &BufferPool,

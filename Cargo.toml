@@ -19,6 +19,13 @@ thiserror = "2"
 # Structured logging; env-filter lets ops tune verbosity without recompiles.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Serialization for config file persistence.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# XDG-based config directories (cross-platform).
+dirs = "5"
+# Open files/URLs with the system's default handler.
+open = "5"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # nokhwa: cross-platform capture abstraction; input-v4l = native V4L2 backend,

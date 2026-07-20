@@ -10,7 +10,7 @@ use std::path::Path;
 
 use tracing::warn;
 
-use crate::config::{Config, SinkKind};
+use crate::config::{ResolvedConfig, SinkKind};
 use crate::frame::Frame;
 
 pub mod null;
@@ -23,7 +23,7 @@ pub mod winpipe;
 #[cfg(target_os = "linux")]
 pub use v4l2loop::{
     check_device_access, discover_loopback_devices, find_loopback_device, is_module_loaded,
-    load_module,
+    load_module, load_module_with_params,
 };
 #[cfg(target_os = "linux")]
 pub use v4l2loop::{AccessError, LoopbackError, ModuleError};
@@ -36,7 +36,7 @@ pub trait Sink: Send {
     fn describe(&self) -> String;
 }
 
-pub fn build_with_path(cfg: &Config, path: &Path) -> Box<dyn Sink> {
+pub fn build_with_path(cfg: &ResolvedConfig, path: &Path) -> Box<dyn Sink> {
     let kind = match cfg.sink {
         SinkKind::Auto => {
             #[cfg(target_os = "linux")]

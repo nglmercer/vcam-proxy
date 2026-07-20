@@ -20,7 +20,7 @@ use nokhwa::utils::{
 use nokhwa::{Buffer, Camera, NokhwaError};
 use tracing::{debug, info, warn};
 
-use crate::config::{Config, FormatPref};
+use crate::config::{FormatPref, ResolvedConfig};
 use crate::convert;
 use crate::frame::{BufferPool, Frame, PixelFormat};
 use crate::pipeline::Stats;
@@ -59,7 +59,7 @@ pub fn list_cameras() {
 }
 
 pub fn spawn(
-    cfg: Arc<Config>,
+    cfg: Arc<ResolvedConfig>,
     pool: BufferPool,
     tx: Sender<Frame>,
     shutdown: Shutdown,
@@ -71,7 +71,7 @@ pub fn spawn(
         .expect("failed to spawn capture thread")
 }
 
-fn run(cfg: &Config, pool: &BufferPool, tx: &Sender<Frame>, shutdown: &Shutdown, stats: &Stats) {
+fn run(cfg: &ResolvedConfig, pool: &BufferPool, tx: &Sender<Frame>, shutdown: &Shutdown, stats: &Stats) {
     let backoff = Duration::from_millis(cfg.retry_ms);
 
     while !shutdown.is_set() {
@@ -102,7 +102,7 @@ fn run(cfg: &Config, pool: &BufferPool, tx: &Sender<Frame>, shutdown: &Shutdown,
     info!("capture thread exit");
 }
 
-fn open_camera(cfg: &Config) -> Result<Camera, NokhwaError> {
+fn open_camera(cfg: &ResolvedConfig) -> Result<Camera, NokhwaError> {
     platform_init();
 
     let res = Resolution::new(cfg.width, cfg.height);
@@ -128,7 +128,7 @@ fn open_camera(cfg: &Config) -> Result<Camera, NokhwaError> {
 
 fn capture_loop(
     cam: &mut Camera,
-    cfg: &Config,
+    cfg: &ResolvedConfig,
     pool: &BufferPool,
     tx: &Sender<Frame>,
     shutdown: &Shutdown,
