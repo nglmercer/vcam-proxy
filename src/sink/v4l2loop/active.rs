@@ -57,7 +57,7 @@ impl Active {
         let format = Format {
             width,
             height,
-            fourcc: fourcc.clone(),
+            fourcc,
             field_order: v4l::format::FieldOrder::Any,
             stride: 0,
             size: 0,
@@ -83,10 +83,7 @@ impl Active {
 
     pub(crate) fn write(&mut self, payload: &[u8]) -> io::Result<()> {
         let (buf, meta) = self.stream.next().map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("failed to get output buffer: {e}"),
-            )
+            io::Error::other(format!("failed to get output buffer: {e}"))
         })?;
 
         if meta.bytesused != 0 {

@@ -114,7 +114,6 @@ impl Tray for VcamTray {
             "vcam-proxy — Camera {status}\n{}×{} @ {}fps\nCaptured: {captured} | Written: {written} | Dropped: {dropped}",
             self.stats.width, self.stats.height, self.stats.fps
         )
-        .into()
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
@@ -134,22 +133,22 @@ impl Tray for VcamTray {
         vec![
             // Status information (non-clickable)
             StandardItem {
-                label: status_text.into(),
+                label: status_text,
                 ..Default::default()
             }
             .into(),
             StandardItem {
-                label: format!("Captured: {captured} frames").into(),
+                label: format!("Captured: {captured} frames"),
                 ..Default::default()
             }
             .into(),
             StandardItem {
-                label: format!("Written: {written} frames").into(),
+                label: format!("Written: {written} frames"),
                 ..Default::default()
             }
             .into(),
             StandardItem {
-                label: format!("Dropped: {dropped} frames").into(),
+                label: format!("Dropped: {dropped} frames"),
                 ..Default::default()
             }
             .into(),

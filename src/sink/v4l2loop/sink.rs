@@ -94,8 +94,7 @@ impl super::super::Sink for V4l2LoopSink {
                     }
                 }
             } else {
-                Err(io::Error::new(
-                    io::ErrorKind::Other,
+                Err(io::Error::other(
                     "failed to scale frame to driver resolution",
                 ))
             }

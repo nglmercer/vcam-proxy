@@ -18,7 +18,7 @@
 //! ```
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -126,7 +126,7 @@ impl Settings {
     }
 
     /// Ensure the config directory exists.
-    fn ensure_dir(path: &PathBuf) -> std::io::Result<()> {
+    fn ensure_dir(path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -166,7 +166,7 @@ impl Settings {
         Self::ensure_dir(&path)?;
 
         let content = toml::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
 
         fs::write(&path, content)?;
         info!(path = %path.display(), "saved settings to config file");
