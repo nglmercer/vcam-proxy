@@ -76,12 +76,18 @@ impl GuiWake {
 
 /// Run the egui application on the current thread (the main thread). Blocks until
 /// the window is allowed to close — i.e. on GUI "Quit" or process shutdown.
-pub fn run(state: Arc<Mutex<GuiState>>, shutdown: Shutdown) {
+///
+/// `start_visible` controls whether the native window is mapped at startup.
+/// It must be created hidden (rather than hidden after creation) because on
+/// Wayland a mapped toplevel window CANNOT be unmapped — `Visible(false)` is
+/// a no-op there, which previously left an empty, undrawn window on screen.
+pub fn run(state: Arc<Mutex<GuiState>>, shutdown: Shutdown, start_visible: bool) {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("vcam-proxy — Settings")
             .with_inner_size([540.0, 680.0])
-            .with_resizable(true),
+            .with_resizable(true)
+            .with_visible(start_visible),
         ..Default::default()
     };
 
@@ -208,6 +214,11 @@ impl eframe::App for App {
         };
         if want_open {
             self.visible = true;
+            // Wayland-safe show: the window may be minimized (our "hidden"
+            // state) or never-yet-mapped; un-minimize + map + focus it.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
 
         // Closing the window (vs. an explicit Quit) just hides it — the app
@@ -228,13 +239,17 @@ impl eframe::App for App {
 
         // Hidden: stay hidden, poll periodically for the open request.
         // Do NOT block the main/event-loop thread.
+        // "Hidden" is implemented as minimized because Wayland cannot unmap a
+        // toplevel window (Visible(false) is a no-op there and used to leave
+        // an empty undrawn window on screen).
         if !self.visible {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             ctx.request_repaint_after(Duration::from_millis(200));
             return;
         }
 
         // Visible: actually show and draw the UI.
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
 
         // Visible: edit a local copy so we don't fight the borrow checker, then
@@ -389,19 +404,19 @@ impl eframe::App for App {
                             restart = true;
                             self.status.clear();
                             self.visible = false;
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                         }
                         Err(e) => self.status = e,
                     }
                 }
                 if ui.button("Hide").clicked() {
                     self.visible = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
                 if ui.button("Quit").clicked() {
                     quit = true;
                     self.visible = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
             });
         });

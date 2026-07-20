@@ -159,9 +159,13 @@ fn main() {
 
     // Main thread: run the GUI if enabled; otherwise just wait for the
     // controller to finish (it exits on shutdown / GUI Quit).
+    let start_visible = first_run || cli.settings;
     match gui_state {
         Some(state) => {
-            ui::run(state, shutdown.clone());
+            // The window is CREATED hidden when it should start hidden:
+            // on Wayland a mapped window cannot be hidden again, so showing
+            // then hiding leaves a permanent empty window on screen.
+            ui::run(state, shutdown.clone(), start_visible);
             // GUI closed (Quit or shutdown): make sure the controller unwinds.
             shutdown.request();
             let _ = controller.join();

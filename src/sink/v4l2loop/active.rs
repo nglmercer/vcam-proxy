@@ -19,10 +19,53 @@ use super::discovery::is_loopback_driver;
 /// Kernel buffers requested from the loopback driver. More buffers help when
 /// multiple readers (OBS + browser) drain at slightly different rates.
 pub(crate) const NUM_KBUF: u32 = 4;
-/// v4l2loopback control IDs for keep_format, sustain_framerate, timeout.
-pub(crate) const CID_KEEP_FORMAT: u32 = 0x00982000 + 1;
-pub(crate) const CID_SUSTAIN_FRAMERATE: u32 = 0x00982000 + 2;
-pub(crate) const CID_TIMEOUT: u32 = 0x00982000 + 3;
+/// v4l2loopback custom control IDs (keep_format, sustain_framerate, timeout).
+/// These are the values current v4l2loopback builds register
+/// (`V4L2_CID_USER_BASE + 0xf000`), verified against a live device; they are
+/// only a fallback — the IDs are always looked up by control NAME first,
+/// because they have changed across module versions and guessing wrong means
+/// `keep_format` stays latched and every VIDIOC_S_FMT is silently ignored.
+pub(crate) const CID_KEEP_FORMAT: u32 = 0x0098f900;
+pub(crate) const CID_SUSTAIN_FRAMERATE: u32 = 0x0098f901;
+pub(crate) const CID_TIMEOUT: u32 = 0x0098f902;
+
+/// Resolved v4l2loopback control IDs: (keep_format, sustain_framerate, timeout).
+#[derive(Clone, Copy)]
+struct LoopbackCids {
+    keep_format: u32,
+    sustain_framerate: u32,
+    timeout: u32,
+}
+
+/// Look up the real control IDs by name via VIDIOC_QUERYCTRL; fall back to the
+/// well-known constants when the query is unavailable.
+fn loopback_cids(dev: &Device) -> LoopbackCids {
+    let mut cids = LoopbackCids {
+        keep_format: CID_KEEP_FORMAT,
+        sustain_framerate: CID_SUSTAIN_FRAMERATE,
+        timeout: CID_TIMEOUT,
+    };
+    match dev.query_controls() {
+        Ok(ctrls) => {
+            for c in ctrls {
+                match c.name.as_str() {
+                    "keep_format" => cids.keep_format = c.id,
+                    "sustain_framerate" => cids.sustain_framerate = c.id,
+                    "timeout" => cids.timeout = c.id,
+                    _ => {}
+                }
+            }
+            debug!(
+                keep_format = cids.keep_format,
+                sustain_framerate = cids.sustain_framerate,
+                timeout = cids.timeout,
+                "resolved v4l2loopback control ids"
+            );
+        }
+        Err(e) => debug!(error = %e, "control query failed; using default v4l2loopback ids"),
+    }
+    cids
+}
 
 pub(crate) struct Active {
     stream: MmapStream<'static>,
@@ -57,8 +100,15 @@ impl Active {
             }
         }
 
-        // Disable keep_format so VIDIOC_S_FMT actually applies the requested geometry.
-        disable_keep_format(&dev);
+        // Resolve the real control IDs by name (wrong IDs mean the writes
+        // below silently no-op and S_FMT stays ignored).
+        let cids = loopback_cids(&dev);
+
+        // Disable keep_format so VIDIOC_S_FMT actually applies the requested
+        // geometry. NOTE: v4l2loopback latches keep_format=1 as soon as any
+        // capture client opens the node, so a stale format from a previous
+        // session would otherwise be impossible to change.
+        disable_keep_format(&dev, cids.keep_format);
 
         let fourcc = FourCC::new(&fmt.fourcc());
         let format = Format {
@@ -96,7 +146,7 @@ impl Active {
 
         // Re-enable keep_format + sustain_framerate so the virtual camera keeps advertising
         // a fixed format to CAPTURE clients (Chrome, Firefox, Zoom) between attaches.
-        apply_loopback_controls(&dev);
+        apply_loopback_controls(&dev, cids);
 
         let stream = MmapStream::with_buffers(&dev, Type::VideoOutput, NUM_KBUF)?;
 
@@ -155,27 +205,30 @@ impl Active {
 }
 
 /// Disable keep_format so VIDIOC_S_FMT actually applies the requested geometry.
-fn disable_keep_format(dev: &Device) {
+fn disable_keep_format(dev: &Device, cid: u32) {
     match dev.set_control(Control {
-        id: CID_KEEP_FORMAT,
+        id: cid,
         value: CtrlValue::Boolean(false),
     }) {
         Ok(()) => debug!("keep_format disabled for format negotiation"),
-        Err(e) => debug!(error = %e, "keep_format disable not set (ok on old modules)"),
+        Err(e) => warn!(
+            error = %e,
+            "could not disable keep_format; a stale format may be stuck (close apps using the virtual camera)"
+        ),
     }
 }
 
 /// Enable keep_format + sustain_framerate so the virtual camera keeps advertising
 /// a fixed format to CAPTURE clients (Chrome, Firefox, Zoom) between attaches.
-fn apply_loopback_controls(dev: &Device) {
+fn apply_loopback_controls(dev: &Device, cids: LoopbackCids) {
     for (id, name, value) in [
-        (CID_KEEP_FORMAT, "keep_format", CtrlValue::Boolean(true)),
+        (cids.keep_format, "keep_format", CtrlValue::Boolean(true)),
         (
-            CID_SUSTAIN_FRAMERATE,
+            cids.sustain_framerate,
             "sustain_framerate",
             CtrlValue::Boolean(true),
         ),
-        (CID_TIMEOUT, "timeout", CtrlValue::Integer(3000)),
+        (cids.timeout, "timeout", CtrlValue::Integer(3000)),
     ] {
         match dev.set_control(Control { id, value }) {
             Ok(()) => debug!(control = name, "loopback control set"),
