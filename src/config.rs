@@ -124,6 +124,12 @@ pub struct ResolvedConfig {
     pub multi_reader: bool,
     pub exclusive_caps: u32,
     pub timeout: u32,
+    /// When true, the capture thread ignores `width`/`height`/`fps` and instead
+    /// negotiates the camera's highest-resolution supported mode (fps as
+    /// tiebreak). Enabled automatically when the user does not pass an explicit
+    /// `--width`/`--height` on the CLI. `width`/`height`/`fps` still hold the
+    /// fallback geometry used if the capability query fails.
+    pub auto_resolution: bool,
 }
 
 impl ResolvedConfig {
@@ -149,6 +155,9 @@ impl ResolvedConfig {
             multi_reader: cli.multi_reader.unwrap_or(settings.multi_reader),
             exclusive_caps: cli.exclusive_caps.unwrap_or(settings.exclusive_caps),
             timeout: cli.timeout.unwrap_or(settings.timeout),
+            // Auto-pick the camera's max resolution unless the user pinned a
+            // specific geometry via the CLI.
+            auto_resolution: cli.width.is_none() && cli.height.is_none(),
         }
     }
 

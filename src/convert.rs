@@ -68,6 +68,64 @@ pub fn nv12_to_rgb24(src: &[u8], dst: &mut [u8], width: u32, height: u32) -> boo
     true
 }
 
+/// Interleaved RGB24 -> semi-planar NV12 (Y plane + interleaved UV plane).
+///
+/// NV12 is the format browsers (Chrome/Firefox WebRTC) reliably accept from a
+/// V4L2 capture device, and it is half the size of RGB24/YUYV. Chroma is
+/// 4:2:0 subsampled by averaging each 2x2 RGB block. BT.601 studio swing to
+/// match [`pack_px`]'s inverse coefficients.
+///
+/// Returns `false` when buffer sizes are inconsistent with the geometry.
+pub fn rgb24_to_nv12(src: &[u8], dst: &mut [u8], width: u32, height: u32) -> bool {
+    let (w, h) = (width as usize, height as usize);
+    // NV12 requires even dimensions for the 4:2:0 chroma grid.
+    if w == 0 || h == 0 || w % 2 != 0 || h % 2 != 0 {
+        return false;
+    }
+    if src.len() < w * h * 3 || dst.len() < w * h * 3 / 2 {
+        return false;
+    }
+
+    let (y_plane, uv_plane) = dst.split_at_mut(w * h);
+
+    // Luma for every pixel.
+    for row in 0..h {
+        for col in 0..w {
+            let s = (row * w + col) * 3;
+            let (r, g, b) = (src[s] as i32, src[s + 1] as i32, src[s + 2] as i32);
+            // BT.601: Y = 16 + (66R + 129G + 25B) / 256
+            let y = 16 + ((66 * r + 129 * g + 25 * b + 128) >> 8);
+            y_plane[row * w + col] = y.clamp(0, 255) as u8;
+        }
+    }
+
+    // Chroma: one U/V pair per 2x2 block, averaged.
+    for by in (0..h).step_by(2) {
+        for bx in (0..w).step_by(2) {
+            let mut rs = 0i32;
+            let mut gs = 0i32;
+            let mut bs = 0i32;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let s = ((by + dy) * w + (bx + dx)) * 3;
+                    rs += src[s] as i32;
+                    gs += src[s + 1] as i32;
+                    bs += src[s + 2] as i32;
+                }
+            }
+            let (r, g, b) = (rs / 4, gs / 4, bs / 4);
+            // BT.601: U = 128 + (-38R - 74G + 112B) / 256
+            //         V = 128 + (112R - 94G - 18B) / 256
+            let u = 128 + ((-38 * r - 74 * g + 112 * b + 128) >> 8);
+            let v = 128 + ((112 * r - 94 * g - 18 * b + 128) >> 8);
+            let uv = (by / 2) * w + bx; // bx is even -> UV pair index
+            uv_plane[uv] = u.clamp(0, 255) as u8;
+            uv_plane[uv + 1] = v.clamp(0, 255) as u8;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,5 +177,40 @@ mod tests {
         let mut dst = [0u8; 6];
         assert!(!yuy2_to_rgb24(&src, &mut dst, 10, 10));
         assert!(!nv12_to_rgb24(&src, &mut dst, 10, 10));
+    }
+
+    #[test]
+    fn rgb24_to_nv12_gray() {
+        // 2x2 mid-gray block -> Y ~= 126, chroma ~= neutral (128).
+        let src = [128u8; 2 * 2 * 3];
+        let mut dst = [0u8; 2 * 2 * 3 / 2];
+        assert!(rgb24_to_nv12(&src, &mut dst, 2, 2));
+        for &y in &dst[0..4] {
+            assert!((y as i32 - 126).abs() <= 3, "Y={y}");
+        }
+        assert!((dst[4] as i32 - 128).abs() <= 2, "U={}", dst[4]);
+        assert!((dst[5] as i32 - 128).abs() <= 2, "V={}", dst[5]);
+    }
+
+    #[test]
+    fn rgb24_to_nv12_red_roundtrip() {
+        // Pure red -> NV12 -> back to RGB should stay red-ish.
+        let src = [255u8, 0, 0].repeat(2 * 2);
+        let mut nv12 = [0u8; 2 * 2 * 3 / 2];
+        assert!(rgb24_to_nv12(&src, &mut nv12, 2, 2));
+        let mut rgb = [0u8; 2 * 2 * 3];
+        assert!(nv12_to_rgb24(&nv12, &mut rgb, 2, 2));
+        for px in rgb.chunks_exact(3) {
+            assert!(px[0] > 220, "R high: {px:?}");
+            assert!(px[1] < 40, "G low: {px:?}");
+            assert!(px[2] < 40, "B low: {px:?}");
+        }
+    }
+
+    #[test]
+    fn rgb24_to_nv12_rejects_odd_dims() {
+        let src = [0u8; 3 * 3 * 3];
+        let mut dst = [0u8; 3 * 3 * 3 / 2 + 1];
+        assert!(!rgb24_to_nv12(&src, &mut dst, 3, 3));
     }
 }
