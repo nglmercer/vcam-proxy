@@ -1,0 +1,61 @@
+[package]
+name = "vcam-proxy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "Low-latency physical-camera -> virtual-loopback proxy (v4l2loopback on Linux, Named-Pipe IPC on Windows)"
+keywords = ["camera", "v4l2", "v4l2loopback", "virtual-camera", "streaming"]
+
+[dependencies]
+# CLI parsing (derive keeps it declarative and type-safe).
+clap = { version = "4.5", features = ["derive"] }
+# Bounded MPMC channels with non-blocking try_send/recv: the backbone of the
+# zero-alloc buffer pool and the capture->sink hand-off.
+crossbeam-channel = "0.5"
+# SIGINT/SIGTERM -> atomic flag, for orderly device/fd teardown.
+ctrlc = "3.4"
+thiserror = "2"
+# Structured logging; env-filter lets ops tune verbosity without recompiles.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# nokhwa: cross-platform capture abstraction; input-v4l = native V4L2 backend,
+# decoding = MJPEG software decode, camera-sync-impl = Send across threads.
+nokhwa = { version = "0.10.11", default-features = false, features = [
+    "input-v4l",
+    "decoding",
+    "camera-sync-impl",
+] }
+# v4l: safe bindings over V4L2 ioctls (VIDIOC_S_FMT / REQBUFS / QBUF / DQBUF /
+# STREAMON) giving kernel-mapped (mmap) output buffers for the loopback write.
+v4l = "0.14"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nokhwa = { version = "0.10.11", default-features = false, features = [
+    "input-msmf",
+    "decoding",
+    "camera-sync-impl",
+] }
+# Raw Win32 for the virtual-camera IPC transport (overlapped Named Pipes).
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nokhwa = { version = "0.10.11", default-features = false, features = [
+    "input-avfoundation",
+    "decoding",
+    "camera-sync-impl",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
