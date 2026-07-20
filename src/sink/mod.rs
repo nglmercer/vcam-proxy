@@ -6,7 +6,7 @@
 //! - Anywhere: `null` — discards frames (benchmarking / dry runs).
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tracing::warn;
 
@@ -22,9 +22,11 @@ pub mod winpipe;
 // Re-export the Linux discovery utilities for use from main.
 #[cfg(target_os = "linux")]
 pub use v4l2loop::{
-    check_device_access, discover_loopback_devices, ensure_module_loaded_with_install,
-    exclusive_caps_active, find_loopback_device, is_module_loaded,
+    check_device_access, count_loopback_devices, discover_loopback_devices,
+    ensure_module_loaded_with_install, exclusive_caps_active, find_loopback_device,
+    is_loopback_driver, is_module_loaded, load_module_with_params_force,
 };
+// unload_module is available via v4l2loop::unload_module if needed
 #[cfg(target_os = "linux")]
 pub use v4l2loop::{AccessError, LoopbackError, ModuleError};
 
@@ -80,5 +82,20 @@ pub fn build_with_path(cfg: &ResolvedConfig, path: &Path) -> Box<dyn Sink> {
             }
         }
         SinkKind::Auto => unreachable!("auto resolved above"),
+    }
+}
+
+/// Build a sink that writes to *all* provided loopback device paths. This is the
+/// multi-reader path: with `devices >= 2` under v4l2loopback, each node must
+/// receive the same frames or the extras appear as dead/black cameras.
+pub fn build_multi_with_paths(paths: Vec<PathBuf>) -> Box<dyn Sink> {
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(v4l2loop::V4l2LoopMultiSink::new(paths))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        warn!("multi-device v4l2 sink requested on non-Linux; using null sink");
+        Box::new(null::NullSink::default())
     }
 }

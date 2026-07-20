@@ -28,7 +28,7 @@ use config::{Config, ResolvedConfig};
 use frame::BufferPool;
 use pipeline::Stats;
 use shutdown::Shutdown;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 fn main() {
@@ -198,6 +198,75 @@ fn main() {
         }
     }
 
+    // Multi-reader mode requires at least 2 loopback devices. If the module is
+    // already loaded with only 1 device, we need to reload it with devices=2.
+    // Each app will then open a different device node, and the proxy writes
+    // frames to both so all apps see the same camera feed.
+    if multi_reader && sink::is_module_loaded() {
+        let current_devices = sink::count_loopback_devices();
+        if current_devices < 2 {
+            info!(
+                current_devices,
+                "multi-reader mode requires 2 devices, reloading module with devices=2"
+            );
+            eprintln!(
+                "WARNING: Multi-reader mode requires 2 virtual cameras but only {current_devices} found.\n\
+                 Reloading v4l2loopback module with devices=2...\n\
+                 (A polkit authentication dialog may appear)"
+            );
+            match sink::load_module_with_params_force(&module_params) {
+                Ok(()) => {
+                    // Wait for the second device node to appear by checking sysfs
+                    // directly (discover_loopback_devices may take time to see new nodes)
+                    let mut devices_ready = false;
+                    for _ in 0..50 {
+                        std::thread::sleep(Duration::from_millis(200));
+                        if sink::count_loopback_devices() >= 2 {
+                            devices_ready = true;
+                            break;
+                        }
+                    }
+                    if devices_ready {
+                        eprintln!("✓ Multi-reader mode ready: 2 virtual cameras available");
+                        info!("multi-reader module reload successful, 2 devices available");
+                    } else {
+                        warn!("module reloaded but only {} devices found after waiting", sink::count_loopback_devices());
+                        eprintln!(
+                            "WARNING: Module reloaded but only {} device(s) found.\n\
+                             The second device should appear shortly. If not, try:\n\
+                             \n\
+                             sudo modprobe -r v4l2loopback\n\
+                             sudo modprobe v4l2loopback {module_params}",
+                            sink::count_loopback_devices()
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to reload module with devices=2");
+                    eprintln!(
+                        "ERROR: Failed to reload v4l2loopback with devices=2: {e}\n\
+                         \n\
+                         Multi-reader mode requires 2 virtual camera devices so that\n\
+                         multiple apps can open different nodes simultaneously.\n\
+                         \n\
+                         Please reload manually:\n\
+                         \n\
+                           sudo modprobe -r v4l2loopback\n\
+                           sudo modprobe v4l2loopback {module_params}\n\
+                         \n\
+                         Or run vcam-proxy with:\n\
+                           vcam-proxy --auto-load-module"
+                    );
+                    // Don't exit - single device still works for one app at a time
+                    eprintln!("\nContinuing with single-device mode (only one app at a time)...");
+                    // Fall back to single reader by updating the flag
+                    // Note: we keep cfg.multi_reader as-is for sink selection,
+                    // but the sink will fall back to single if <2 devices found
+                }
+            }
+        }
+    }
+
     // Determine the loopback device to use (auto-detect if needed).
     let loopback_path = match sink::find_loopback_device(Path::new(&cfg.device)) {
         Ok(path) => path,
@@ -263,13 +332,43 @@ fn main() {
     let slot_bytes = cfg.width as usize * cfg.height as usize * 3;
     let pool = BufferPool::new(cfg.buffers, slot_bytes);
 
+    // Build the sink: either single-device (default) or multi-device
+    // (when multi_reader=true we feed ALL v4l2loopback nodes so every device
+    // streams the camera — otherwise extras appear as dead/black cameras).
+    let sink_impl = if multi_reader {
+        let all_paths = sink::discover_loopback_devices().unwrap_or_default();
+        let loopback_paths: Vec<_> = all_paths
+            .into_iter()
+            .filter(|d| sink::is_loopback_driver(&d.driver))
+            .map(|d| d.path)
+            .collect();
+        if loopback_paths.len() >= 2 {
+            info!(devices = loopback_paths.len(), "multi-reader sink: feeding all loopback devices");
+            eprintln!("✓ Multi-reader mode active: writing to {} virtual cameras", loopback_paths.len());
+            eprintln!("  App 1 can open: {}", loopback_paths[0].display());
+            eprintln!("  App 2 can open: {}", loopback_paths[1].display());
+            sink::build_multi_with_paths(loopback_paths)
+        } else {
+            warn!("multi-reader sink: only one loopback device found, using single sink");
+            eprintln!("\n⚠ Multi-reader mode is ENABLED but only 1 virtual camera found.");
+            eprintln!("  Only ONE app can use the virtual camera at a time.");
+            eprintln!("  Other apps will get 'Device busy' errors.\n");
+            eprintln!("  To fix this, reload v4l2loopback with 2 devices:\n");
+            eprintln!("    sudo modprobe -r v4l2loopback");
+            eprintln!("    sudo modprobe v4l2loopback exclusive_caps=1 card_label=\"vcam-proxy\" devices=2\n");
+            sink::build_with_path(&cfg, Path::new(&loopback_path))
+        }
+    } else {
+        sink::build_with_path(&cfg, Path::new(&loopback_path))
+    };
+
     // Bounded hand-off: a full channel means "sink is behind" and frames are
     // dropped at the capture side, never queued unboundedly.
     let (tx, rx) = crossbeam_channel::bounded(cfg.buffers);
 
     let sink_handle = pipeline::spawn_sink(
         cfg.clone(),
-        loopback_path,
+        sink_impl,
         rx,
         pool.clone(),
         shutdown.clone(),

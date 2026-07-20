@@ -3,7 +3,6 @@
 //! statistics counters and the periodic throughput report.
 
 use std::io;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -15,7 +14,7 @@ use tracing::{info, warn};
 use crate::config::ResolvedConfig;
 use crate::frame::{BufferPool, Frame};
 use crate::shutdown::Shutdown;
-use crate::sink;
+use crate::sink::Sink;
 
 #[derive(Default)]
 pub struct Stats {
@@ -26,7 +25,7 @@ pub struct Stats {
 
 pub fn spawn_sink(
     cfg: Arc<ResolvedConfig>,
-    loopback_path: PathBuf,
+    sink_impl: Box<dyn Sink>,
     rx: Receiver<Frame>,
     pool: BufferPool,
     shutdown: Shutdown,
@@ -38,7 +37,7 @@ pub fn spawn_sink(
         .spawn(move || {
             run(
                 &cfg,
-                &loopback_path,
+                sink_impl,
                 &rx,
                 &pool,
                 &shutdown,
@@ -50,16 +49,15 @@ pub fn spawn_sink(
 }
 
 fn run(
-    cfg: &ResolvedConfig,
-    loopback_path: &Path,
+    _cfg: &ResolvedConfig,
+    mut sink_impl: Box<dyn Sink>,
     rx: &Receiver<Frame>,
     pool: &BufferPool,
     shutdown: &Shutdown,
     stats: &Stats,
     sink_switch: &crate::tray::SinkSwitch,
 ) {
-    let mut sink = sink::build_with_path(cfg, loopback_path);
-    info!(sink = %sink.describe(), "sink ready");
+    info!(sink = %sink_impl.describe(), "sink ready");
 
     let mut last = Instant::now();
     let mut last_written = 0u64;
@@ -87,7 +85,7 @@ fn run(
             continue;
         }
 
-        match sink.write(&frame) {
+        match sink_impl.write(&frame) {
             Ok(()) => {
                 stats.written.fetch_add(1, Ordering::Relaxed);
                 write_errors = 0;

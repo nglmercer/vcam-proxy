@@ -202,7 +202,7 @@ const CID_TIMEOUT: u32 = 0x0098_f902;
 
 /// True when the driver string is v4l2loopback (kernel reports either spelling).
 #[inline]
-fn is_loopback_driver(driver: &str) -> bool {
+pub fn is_loopback_driver(driver: &str) -> bool {
     driver == "v4l2 loopback" || driver == "v4l2loopback"
 }
 
@@ -406,11 +406,89 @@ pub fn is_module_loaded() -> bool {
         .unwrap_or(false)
 }
 
+/// Count how many v4l2loopback devices currently exist in /dev.
+pub fn count_loopback_devices() -> usize {
+    match discover_loopback_devices() {
+        Ok(devices) => devices
+            .iter()
+            .filter(|d| is_loopback_driver(&d.driver))
+            .count(),
+        Err(_) => 0,
+    }
+}
+
+/// Unload the v4l2loopback kernel module via pkexec.
+pub fn unload_module() -> Result<(), ModuleError> {
+    if !is_module_loaded() {
+        return Ok(());
+    }
+
+    info!("unloading v4l2loopback module via pkexec");
+
+    let result = std::process::Command::new("pkexec")
+        .arg("modprobe")
+        .arg("-r")
+        .arg("v4l2loopback")
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => {
+            // Wait for module to actually unload
+            for _ in 0..50 {
+                if !is_module_loaded() {
+                    info!("v4l2loopback module unloaded successfully");
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(ModuleError::LoadFailed {
+                reason: "module still loaded after modprobe -r".into(),
+            })
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(ModuleError::LoadFailed {
+                reason: format!(
+                    "pkexec modprobe -r failed (exit {:?}): {}",
+                    output.status.code(),
+                    stderr.trim()
+                ),
+            })
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(ModuleError::PkexecNotAvailable),
+        Err(e) => Err(ModuleError::LoadFailed {
+            reason: e.to_string(),
+        }),
+    }
+}
+
 /// Load the v4l2loopback kernel module with custom parameters via pkexec.
 /// The `params` string is split on whitespace and passed as arguments to modprobe.
+///
+/// If the module is already loaded, it will be reloaded with the new parameters
+/// when `force_reload` is true. This is needed when the user changes the number
+/// of devices (e.g., enabling multi-reader mode).
 pub fn load_module_with_params(params: &str) -> Result<(), ModuleError> {
-    if is_module_loaded() {
+    load_module_with_params_internal(params, false)
+}
+
+/// Load the module, optionally forcing a reload if already loaded.
+pub fn load_module_with_params_force(params: &str) -> Result<(), ModuleError> {
+    load_module_with_params_internal(params, true)
+}
+
+fn load_module_with_params_internal(params: &str, force_reload: bool) -> Result<(), ModuleError> {
+    let already_loaded = is_module_loaded();
+
+    if already_loaded && !force_reload {
         return Ok(());
+    }
+
+    if already_loaded && force_reload {
+        info!("v4l2loopback module already loaded; reloading with new params: {params}");
+        unload_module()?;
+        // Small delay to ensure cleanup after unload
+        std::thread::sleep(Duration::from_millis(200));
     }
 
     info!("v4l2loopback module not loaded; attempting auto-load via pkexec with params: {params}");
@@ -424,9 +502,18 @@ pub fn load_module_with_params(params: &str) -> Result<(), ModuleError> {
 
     match result {
         Ok(output) if output.status.success() => {
-            std::thread::sleep(Duration::from_millis(200));
+            // Wait for module to load and device nodes to appear
+            for _ in 0..50 {
+                if is_module_loaded() && count_loopback_devices() > 0 {
+                    info!("v4l2loopback module loaded successfully");
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            // Module loaded but no devices found - still consider it success
+            // (devices may appear after udev processing)
             if is_module_loaded() {
-                info!("v4l2loopback module loaded successfully");
+                info!("v4l2loopback module loaded (devices may still be creating)");
                 Ok(())
             } else {
                 Err(ModuleError::LoadFailed {
@@ -642,13 +729,20 @@ impl Active {
             }
         }
 
-        // Pin the negotiated format and sustain a steady frame clock so
-        // consumers (especially browsers via PipeWire) always see a stable
-        // UVC-like capture device even when no reader is currently attached.
-        apply_loopback_controls(&dev);
+        // IMPORTANT: keep_format must be disabled BEFORE setting the format.
+        // If the module was already loaded with a stale format (e.g. from a
+        // prior session), keep_format=1 would cause VIDIOC_S_FMT to silently
+        // return the old resolution instead of applying ours — forcing every
+        // frame through an expensive software scale. Disable it first, apply
+        // the format we want, then re-enable it so the format stays pinned
+        // between consumer attach/detach cycles.
+        disable_keep_format(&dev);
 
         let want = Format::new(width, height, FourCC::new(&fmt.fourcc()));
         let actual = Output::set_format(&dev, &want)?;
+
+        // Now lock the format so browsers see a stable UVC-like device.
+        apply_loopback_controls(&dev);
         // Accept whatever the driver selects - v4l2loopback may adjust resolution
         // to match its internal state. We'll scale frames if needed.
         if actual.width != width || actual.height != height || actual.fourcc != want.fourcc {
@@ -727,6 +821,21 @@ impl Active {
         buf[..payload.len()].copy_from_slice(payload);
         meta.bytesused = payload.len() as u32;
         Ok(())
+    }
+}
+
+/// Disable keep_format so VIDIOC_S_FMT actually applies the requested geometry.
+/// If the module was loaded in a prior session with a different resolution,
+/// keep_format=1 would cause S_FMT to silently return the old format, forcing
+/// every frame through an expensive software scale. Call this *before* S_FMT,
+/// then re-enable with [`apply_loopback_controls`] afterwards.
+fn disable_keep_format(dev: &Device) {
+    match dev.set_control(Control {
+        id: CID_KEEP_FORMAT,
+        value: CtrlValue::Boolean(false),
+    }) {
+        Ok(()) => debug!("keep_format disabled for format negotiation"),
+        Err(e) => debug!(error = %e, "keep_format disable not set (ok on old modules)"),
     }
 }
 
@@ -851,5 +960,49 @@ impl super::Sink for V4l2LoopSink {
 
     fn describe(&self) -> String {
         format!("v4l2loopback:{}", self.path.display())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-device sink: writes the same frame to every v4l2loopback node created
+// by the module (devices=N). Without this, only the first node receives
+// frames and the others appear as dead/black cameras to consumers.
+// ---------------------------------------------------------------------------
+
+/// Writes each frame to *all* provided loopback device paths. Used when
+/// `multi_reader=true` and the module was loaded with `devices >= 2`.
+pub struct V4l2LoopMultiSink {
+    sinks: Vec<V4l2LoopSink>,
+}
+
+impl V4l2LoopMultiSink {
+    pub fn new(paths: Vec<PathBuf>) -> Self {
+        Self {
+            sinks: paths.into_iter().map(V4l2LoopSink::new).collect(),
+        }
+    }
+}
+
+impl super::Sink for V4l2LoopMultiSink {
+    fn write(&mut self, frame: &Frame) -> io::Result<()> {
+        let mut last_err = None;
+        for sink in &mut self.sinks {
+            if let Err(e) = sink.write(frame) {
+                // WouldBlock on one device (no reader) shouldn't stop us from
+                // feeding the others. Surface the first real error at the end.
+                if e.kind() != io::ErrorKind::WouldBlock {
+                    last_err = Some(e);
+                }
+            }
+        }
+        match last_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    fn describe(&self) -> String {
+        let paths: Vec<_> = self.sinks.iter().map(|s| s.path.display().to_string()).collect();
+        format!("v4l2loopback:multi({})", paths.join(", "))
     }
 }
