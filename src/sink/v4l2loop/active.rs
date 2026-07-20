@@ -73,12 +73,10 @@ impl Active {
             quantization: v4l::format::Quantization::Default,
             transfer: v4l::format::TransferFunction::Default,
         };
-        dev.set_format(&format)?;
-
-        // S_FMT is a negotiation: read back what the driver ACTUALLY applied
-        // so frame-size checks and scaling target the real on-the-wire
+        // S_FMT is a negotiation and returns what the driver ACTUALLY applied;
+        // use it so frame-size checks and scaling target the real on-the-wire
         // geometry instead of the requested one.
-        let actual = dev.get_format()?;
+        let actual = dev.set_format(&format)?;
         if actual.fourcc != fourcc {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

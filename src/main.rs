@@ -233,13 +233,19 @@ fn run_controller(
             break;
         }
 
-        // Build the module parameters based on multi-reader setting.
+        // Build the module parameters. Node numbers start at 10 so the virtual
+        // cameras are easy to tell apart from physical ones and the default
+        // device path (/dev/video10) matches the first node. NOTE: no quotes
+        // around card_label — the params string is split on whitespace and
+        // passed to pkexec without a shell, so quotes would become literal
+        // characters in the card name.
         let exclusive_caps = current_cfg.exclusive_caps;
-        let multi_reader = current_cfg.multi_reader;
-        let devices = if multi_reader { 2 } else { 1 };
+        let desired_devices = current_cfg.devices.clamp(1, 8);
+        let video_nr: Vec<String> = (0..desired_devices).map(|i| (10 + i).to_string()).collect();
         let module_params = format!(
-            "exclusive_caps={exclusive_caps} card_label=\"vcam-proxy\" devices={devices} \
-             max_buffers=4 max_openers=10 timeout={}",
+            "exclusive_caps={exclusive_caps} card_label=vcam-proxy devices={desired_devices} \
+             video_nr={} max_buffers=4 max_openers=16 timeout={}",
+            video_nr.join(","),
             current_cfg.timeout
         );
 
@@ -294,16 +300,24 @@ fn run_controller(
             }
         }
 
-        if multi_reader && sink::is_module_loaded() {
+        // Multi-node mode (devices >= 2): the module must actually expose that
+        // many nodes. Reloading is disruptive — it drops every existing node
+        // and any app currently using the virtual camera — so it only happens
+        // when the user explicitly asked for more nodes than exist. NOTE: a
+        // single v4l2loopback device already serves multiple concurrent
+        // readers (max_openers=16); extra nodes are only needed for apps that
+        // insist on exclusive access.
+        if desired_devices >= 2 && sink::is_module_loaded() {
             let current_devices = sink::count_loopback_devices();
-            if current_devices < 2 {
+            if current_devices < desired_devices as usize {
                 info!(
                     current_devices,
-                    "multi-reader mode requires 2 devices, reloading module with devices=2"
+                    desired_devices, "multi-node mode: reloading module with more devices"
                 );
                 eprintln!(
-                    "WARNING: Multi-reader mode requires 2 virtual cameras but only {current_devices} found.\n\
-                     Reloading v4l2loopback module with devices=2...\n\
+                    "Multi-node mode needs {desired_devices} virtual cameras but only {current_devices} exist.\n\
+                     Reloading v4l2loopback (devices={desired_devices})...\n\
+                     Apps using the virtual camera must re-open it afterwards.\n\
                      (A polkit authentication dialog may appear)"
                 );
                 match sink::load_module_with_params_force(&module_params) {
@@ -311,14 +325,16 @@ fn run_controller(
                         let mut devices_ready = false;
                         for _ in 0..50 {
                             std::thread::sleep(Duration::from_millis(200));
-                            if sink::count_loopback_devices() >= 2 {
+                            if sink::count_loopback_devices() >= desired_devices as usize {
                                 devices_ready = true;
                                 break;
                             }
                         }
                         if devices_ready {
-                            eprintln!("✓ Multi-reader mode ready: 2 virtual cameras available");
-                            info!("multi-reader module reload successful, 2 devices available");
+                            eprintln!(
+                                "✓ Multi-node mode ready: {desired_devices} virtual cameras available"
+                            );
+                            info!(desired_devices, "multi-node module reload successful");
                         } else {
                             warn!(
                                 "module reloaded but only {} devices found after waiting",
@@ -326,7 +342,7 @@ fn run_controller(
                             );
                             eprintln!(
                                 "WARNING: Module reloaded but only {} device(s) found.\n\
-                                 The second device should appear shortly. If not, try:\n\
+                                 If the extra nodes do not appear shortly, try:\n\
                                  \n\
                                  sudo modprobe -r v4l2loopback\n\
                                  sudo modprobe v4l2loopback {module_params}",
@@ -335,23 +351,17 @@ fn run_controller(
                         }
                     }
                     Err(e) => {
-                        warn!(error = %e, "failed to reload module with devices=2");
+                        warn!(error = %e, "failed to reload module for multi-node mode");
                         eprintln!(
-                            "ERROR: Failed to reload v4l2loopback with devices=2: {e}\n\
+                            "ERROR: Could not reload v4l2loopback for multi-node mode: {e}\n\
                              \n\
-                             Multi-reader mode requires 2 virtual camera devices so that\n\
-                             multiple apps can open different nodes simultaneously.\n\
-                             \n\
-                             Please reload manually:\n\
+                             Continuing with the existing node(s) — multiple apps can still\n\
+                             share ONE node (native multi-reader). For manual setup:\n\
                              \n\
                                sudo modprobe -r v4l2loopback\n\
                                sudo modprobe v4l2loopback {module_params}\n\
                              \n\
-                             Or run vcam-proxy with:\n\
-                               vcam-proxy --auto-load-module"
-                        );
-                        eprintln!(
-                            "\nContinuing with single-device mode (only one app at a time)..."
+                             Then restart vcam-proxy."
                         );
                     }
                 }
@@ -364,11 +374,12 @@ fn run_controller(
                 match &e {
                     sink::LoopbackError::NoDeviceFound => {
                         eprintln!(
-                            "Error: No virtual camera device found.\n\
+                            "Error: No v4l2loopback virtual camera device found.\n\
                              \n\
                              To create one, run:\n\
-                               sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1\n\
+                               sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1 video_nr=10\n\
                              \n\
+                             Or let vcam-proxy set it up: vcam-proxy --auto-load-module\n\
                              Then verify with: vcam-proxy --list-loopback"
                         );
                     }
@@ -434,7 +445,13 @@ fn run_controller(
         let slot_bytes = current_cfg.width as usize * current_cfg.height as usize * 3;
         let pool = BufferPool::new(current_cfg.buffers, slot_bytes);
 
-        let sink_impl = if multi_reader {
+        // Sink construction:
+        // - devices == 1 (default): a single virtual camera node. One node
+        //   natively serves multiple concurrent readers, so Chrome + Zoom +
+        //   OBS can all open it at once (multi_reader mode).
+        // - devices >= 2 (multi-node): the same feed is written to N isolated
+        //   nodes, for apps that grab a device exclusively.
+        let sink_impl = if desired_devices >= 2 {
             let all_paths = sink::discover_loopback_devices().unwrap_or_default();
             let loopback_paths: Vec<_> = all_paths
                 .into_iter()
@@ -442,28 +459,37 @@ fn run_controller(
                 .map(|d| d.path)
                 .collect();
             if loopback_paths.len() >= 2 {
+                let chosen: Vec<_> = loopback_paths
+                    .into_iter()
+                    .take(desired_devices as usize)
+                    .collect();
                 info!(
-                    devices = loopback_paths.len(),
-                    "multi-reader sink: feeding all loopback devices"
+                    devices = chosen.len(),
+                    "multi-node sink: feeding multiple loopback devices"
                 );
                 eprintln!(
-                    "✓ Multi-reader mode active: writing to {} virtual cameras",
-                    loopback_paths.len()
+                    "✓ Multi-node mode active: writing to {} virtual cameras",
+                    chosen.len()
                 );
-                eprintln!("  App 1 can open: {}", loopback_paths[0].display());
-                eprintln!("  App 2 can open: {}", loopback_paths[1].display());
-                sink::build_multi_with_paths(loopback_paths)
+                for (i, p) in chosen.iter().enumerate() {
+                    eprintln!("  App {} can open: {}", i + 1, p.display());
+                }
+                sink::build_multi_with_paths(chosen)
             } else {
-                warn!("multi-reader sink: only one loopback device found, using single sink");
-                eprintln!("\n⚠ Multi-reader mode is ENABLED but only 1 virtual camera found.");
-                eprintln!("  Only ONE app can use the virtual camera at a time.");
-                eprintln!("  Other apps will get 'Device busy' errors.\n");
-                eprintln!("  To fix this, reload v4l2loopback with 2 devices:\n");
+                warn!("multi-node sink: fewer than 2 loopback devices found, using single sink");
+                eprintln!("\n⚠ Multi-node mode requested ({desired_devices}) but only 1 virtual camera found.");
+                eprintln!("  Falling back to a single node — multiple apps can still share it.");
+                eprintln!("  To create more nodes:\n");
                 eprintln!("    sudo modprobe -r v4l2loopback");
-                eprintln!("    sudo modprobe v4l2loopback exclusive_caps=1 card_label=\"vcam-proxy\" devices=2\n");
+                eprintln!("    sudo modprobe v4l2loopback {module_params}\n");
                 sink::build_with_path(&current_cfg, Path::new(&loopback_path))
             }
         } else {
+            if current_cfg.multi_reader {
+                info!(
+                    "multi-reader: one virtual camera, multiple concurrent readers (native v4l2loopback)"
+                );
+            }
             sink::build_with_path(&current_cfg, Path::new(&loopback_path))
         };
 
@@ -603,13 +629,13 @@ fn list_loopback_devices() {
                 println!("No video output devices found.");
                 println!("\nTo create a virtual camera, run:");
                 println!(
-                    "  sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1"
+                    "  sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1 video_nr=10"
                 );
                 return;
             }
             println!("Video output devices ({} found):", devices.len());
             for dev in &devices {
-                let is_loopback = dev.driver == "v4l2loopback" || dev.driver == "v4l2 loopback";
+                let is_loopback = sink::is_loopback_driver(&dev.driver);
                 println!(
                     "  {} {}{}",
                     dev.path.display(),
@@ -696,7 +722,7 @@ fn run_setup(cfg: Arc<ResolvedConfig>) {
         println!("✗ NOT loaded");
         print!("        Attempting to load via pkexec (with auto-install)... ");
         match sink::ensure_module_loaded_with_install(
-            "exclusive_caps=1 card_label=vcam-proxy devices=1",
+            "exclusive_caps=1 card_label=vcam-proxy devices=1 video_nr=10 max_buffers=4 max_openers=16 timeout=1000",
         ) {
             Ok(()) => {
                 println!("✓ loaded successfully");
@@ -711,11 +737,11 @@ fn run_setup(cfg: Arc<ResolvedConfig>) {
                 println!("          Arch:         sudo pacman -S v4l2loopback-dkms v4l-utils");
                 println!("          openSUSE:     sudo zypper install v4l2loopback");
                 println!("\n        → Then load with:");
-                println!("          sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1");
+                println!("          sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1 video_nr=10");
                 println!("\n        → To load at boot, create /etc/modules-load.d/v4l2loopback.conf with:");
                 println!("          v4l2loopback");
                 println!("\n        → And /etc/modprobe.d/v4l2loopback.conf with:");
-                println!("          options v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1");
+                println!("          options v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1 video_nr=10");
             }
         }
     }
@@ -729,7 +755,7 @@ fn run_setup(cfg: Arc<ResolvedConfig>) {
             } else {
                 println!("✓ found {} device(s):", devices.len());
                 for dev in &devices {
-                    let is_loopback = dev.driver == "v4l2 loopback" || dev.driver == "v4l2loopback";
+                    let is_loopback = sink::is_loopback_driver(&dev.driver);
                     let marker = if is_loopback {
                         " ✓"
                     } else {
@@ -891,6 +917,18 @@ fn print_settings_table(cfg: &ResolvedConfig, settings: &settings::Settings) {
         if cfg.multi_reader != settings.multi_reader {
             'C'
         } else if settings.multi_reader {
+            'F'
+        } else {
+            'D'
+        }
+    );
+    println!(
+        "  {:<20} {:<15} [{:<1}]",
+        "devices",
+        cfg.devices,
+        if cfg.devices != settings.devices {
+            'C'
+        } else if settings.devices != 1 {
             'F'
         } else {
             'D'
