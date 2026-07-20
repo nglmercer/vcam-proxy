@@ -55,6 +55,13 @@ nokhwa = { version = "0.10.11", default-features = false, features = [
     "camera-sync-impl",
 ] }
 
+# Patch: fix nokhwa-core "Closest" fulfillment bug where frame rates are matched
+# against the originally requested resolution instead of the closest found one.
+# This breaks cameras (like ours) where the requested resolution isn't supported by
+# a given pixel format (e.g. YUYV maxes at 640x480 but works at higher res via MJPEG).
+[patch.crates-io]
+nokhwa-core = { path = "vendor/nokhwa-core" }
+
 [profile.release]
 opt-level = 3
 lto = "thin"

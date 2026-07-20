@@ -776,8 +776,6 @@ dependencies = [
 [[package]]
 name = "nokhwa-core"
 version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1cba20bebd3bd9ae22f9273ade5bbe49da3e047c8512b53fbaf8b4b9c80d496"
 dependencies = [
  "bytes",
  "image",
