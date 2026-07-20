@@ -31,11 +31,35 @@ sudo pacman -S base-devel clang
 
 ### 2. Load the kernel module
 
+#### Option A: Let vcam-proxy handle it automatically (recommended)
+
 ```bash
-# Load now (temporary)
+# vcam-proxy will auto-install v4l2loopback-dkms and load the module
+cargo run --release -- --auto-load-module
+
+# Or use the full setup wizard
+cargo run --release -- --setup
+```
+
+#### Option B: Manual installation
+
+```bash
+# Debian/Ubuntu
+sudo apt install v4l2loopback-dkms v4l-utils
+
+# Fedora
+sudo dnf install v4l2loopback
+
+# Arch Linux / CachyOS
+sudo pacman -S v4l2loopback-dkms v4l-utils
+
+# openSUSE
+sudo zypper install v4l2loopback
+
+# Then load the module
 sudo modprobe v4l2loopback exclusive_caps=1 card_label="vcam-proxy" devices=1
 
-# Load at boot (persistent)
+# Optional: Load at boot (persistent)
 echo 'options v4l2loopback exclusive_caps=1 card_label="vcam-proxy" devices=1' \
     | sudo tee /etc/modprobe.d/v4l2loopback.conf
 echo 'v4l2loopback' | sudo tee /etc/modules-load.d/v4l2loopback.conf
@@ -111,7 +135,7 @@ cargo run --release -- --camera 1 --width 1280 --height 720 --fps 30
 | `--sink` | `auto` | Sink backend: `auto`, `v4l2`, `null` |
 | `--dry-run` | false | Test capture without writing to virtual device |
 | `--no-tray` | false | Disable system tray icon |
-| `--auto-load-module` | false | Auto-load v4l2loopback via pkexec |
+| `--auto-load-module` | false | Auto-install (if needed) and load v4l2loopback via pkexec |
 | `--retry-ms` | 1000 | Backoff between camera re-open attempts |
 | `--multi.Reader` | true | Enable multi-reader virtual camera mode |
 | `--exclusive-caps` | 1 | v4l2loopback exclusive_caps (0 or 1) |

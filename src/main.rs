@@ -128,8 +128,8 @@ fn main() {
     // before trying to find a device. This way --auto-load-module has
     // a chance to create the /dev/video* node we need.
     if cli.auto_load_module && !sink::is_module_loaded() {
-        info!("attempting to auto-load v4l2loopback module");
-        match sink::load_module_with_params(&module_params) {
+        info!("attempting to auto-load v4l2loopback module (with auto-install fallback)");
+        match sink::ensure_module_loaded_with_install(&module_params) {
             Ok(()) => {
                 // Module loaded — give kernel a moment to create device nodes
                 std::thread::sleep(Duration::from_millis(500));
@@ -141,6 +141,14 @@ fn main() {
                         eprintln!(
                             "Note: pkexec not available. Run manually:\n  sudo modprobe v4l2loopback {module_params}"
                         );
+                    }
+                    sink::ModuleError::DistroNotSupported => {
+                        eprintln!("Auto-install not supported on this distribution.");
+                        eprintln!("Install v4l2loopback-dkms manually, then run:\n  sudo modprobe v4l2loopback {module_params}");
+                    }
+                    sink::ModuleError::InstallFailed(code) => {
+                        eprintln!("Package installation failed (exit code {code}).");
+                        eprintln!("Check your network connection and try again, or install manually.");
                     }
                     _ => {
                         eprintln!("Failed to auto-load v4l2loopback module: {e}");
@@ -378,8 +386,8 @@ fn run_setup(cfg: Arc<ResolvedConfig>) {
         println!("✓ already loaded");
     } else {
         println!("✗ NOT loaded");
-        print!("        Attempting to load via pkexec... ");
-        match sink::load_module() {
+        print!("        Attempting to load via pkexec (with auto-install)... ");
+        match sink::ensure_module_loaded_with_install("exclusive_caps=1 card_label=vcam-proxy devices=1") {
             Ok(()) => {
                 println!("✓ loaded successfully");
                 std::thread::sleep(Duration::from_millis(500));
@@ -387,7 +395,12 @@ fn run_setup(cfg: Arc<ResolvedConfig>) {
             Err(e) => {
                 println!("✗ failed: {e}");
                 ok = false;
-                println!("\n        → Load it manually with:");
+                println!("\n        → Try installing v4l2loopback-dkms for your distro:");
+                println!("          Debian/Ubuntu: sudo apt install v4l2loopback-dkms v4l-utils");
+                println!("          Fedora:       sudo dnf install v4l2loopback");
+                println!("          Arch:         sudo pacman -S v4l2loopback-dkms v4l-utils");
+                println!("          openSUSE:     sudo zypper install v4l2loopback");
+                println!("\n        → Then load with:");
                 println!("          sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1");
                 println!("\n        → To load at boot, create /etc/modules-load.d/v4l2loopback.conf with:");
                 println!("          v4l2loopback");

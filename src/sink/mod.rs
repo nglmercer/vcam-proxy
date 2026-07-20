@@ -22,8 +22,8 @@ pub mod winpipe;
 // Re-export the Linux discovery utilities for use from main.
 #[cfg(target_os = "linux")]
 pub use v4l2loop::{
-    check_device_access, discover_loopback_devices, find_loopback_device, is_module_loaded,
-    load_module, load_module_with_params,
+    check_device_access, discover_loopback_devices, ensure_module_loaded_with_install,
+    find_loopback_device, is_module_loaded,
 };
 #[cfg(target_os = "linux")]
 pub use v4l2loop::{AccessError, LoopbackError, ModuleError};
