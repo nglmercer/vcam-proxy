@@ -29,14 +29,22 @@ pub fn spawn_sink(
     pool: BufferPool,
     shutdown: Shutdown,
     stats: Arc<Stats>,
+    sink_switch: crate::tray::SinkSwitch,
 ) -> JoinHandle<()> {
     thread::Builder::new()
         .name("sink".into())
-        .spawn(move || run(&cfg, &rx, &pool, &shutdown, &stats))
+        .spawn(move || run(&cfg, &rx, &pool, &shutdown, &stats, &sink_switch))
         .expect("failed to spawn sink thread")
 }
 
-fn run(cfg: &Config, rx: &Receiver<Frame>, pool: &BufferPool, shutdown: &Shutdown, stats: &Stats) {
+fn run(
+    cfg: &Config,
+    rx: &Receiver<Frame>,
+    pool: &BufferPool,
+    shutdown: &Shutdown,
+    stats: &Stats,
+    sink_switch: &crate::tray::SinkSwitch,
+) {
     let mut sink = sink::build(cfg);
     info!(sink = %sink.describe(), "sink ready");
 
@@ -58,6 +66,13 @@ fn run(cfg: &Config, rx: &Receiver<Frame>, pool: &BufferPool, shutdown: &Shutdow
             }
             Err(RecvTimeoutError::Disconnected) => break,
         };
+
+        if !sink_switch.is_on() {
+            // Virtual camera is toggled off: recycle frame without writing.
+            pool.release(frame);
+            report(&mut last, &mut last_written, &mut last_dropped, stats);
+            continue;
+        }
 
         match sink.write(&frame) {
             Ok(()) => {

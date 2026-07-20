@@ -16,6 +16,7 @@ mod frame;
 mod pipeline;
 mod shutdown;
 mod sink;
+mod tray;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,6 +56,14 @@ fn main() {
 
     let shutdown = Shutdown::install();
 
+    // Shared switch: tray toggles it, sink loop reads it. Allows the user to
+    // start/stop the virtual camera output without tearing down capture.
+    let sink_switch = tray::SinkSwitch::new(true);
+
+    // Spawn the system-tray icon for on/off toggle. Gracefully continues
+    // without a tray if D-Bus is unavailable (e.g. SSH session, no desktop).
+    let tray_handle = tray::spawn(sink_switch.clone(), shutdown.clone());
+
     // Slot size covers the worst wire format (RGB24). Slots grow transparently
     // if the camera negotiates something larger.
     let slot_bytes = cfg.width as usize * cfg.height as usize * 3;
@@ -65,8 +74,14 @@ fn main() {
     let (tx, rx) = crossbeam_channel::bounded(cfg.buffers);
 
     let stats = Arc::new(Stats::default());
-    let sink_handle =
-        pipeline::spawn_sink(cfg.clone(), rx, pool.clone(), shutdown.clone(), stats.clone());
+    let sink_handle = pipeline::spawn_sink(
+        cfg.clone(),
+        rx,
+        pool.clone(),
+        shutdown.clone(),
+        stats.clone(),
+        sink_switch.clone(),
+    );
     let capture_handle = capture::spawn(cfg, pool, tx, shutdown.clone(), stats);
 
     while !shutdown.is_set() {
@@ -79,6 +94,9 @@ fn main() {
     }
     if let Err(e) = sink_handle.join() {
         tracing::error!("sink thread panicked: {e:?}");
+    }
+    if let Some(h) = tray_handle {
+        let _ = h.join();
     }
 
     info!("all threads stopped; descriptors released");

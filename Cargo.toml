@@ -31,6 +31,9 @@ nokhwa = { version = "0.10.11", default-features = false, features = [
 # v4l: safe bindings over V4L2 ioctls (VIDIOC_S_FMT / REQBUFS / QBUF / DQBUF /
 # STREAMON) giving kernel-mapped (mmap) output buffers for the loopback write.
 v4l = "0.14"
+# ksni: pure-Rust D-Bus StatusNotifierItem tray icon (no GTK, works on GNOME Wayland).
+# "blocking" feature provides a non-async API, so no extra runtime needed.
+ksni = { version = "0.3", features = ["blocking"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 nokhwa = { version = "0.10.11", default-features = false, features = [
