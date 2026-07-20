@@ -116,9 +116,15 @@ impl Tray for VcamTray {
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let (captured, written, dropped) = self.stats.snapshot();
         let status_text = if self.sink_switch.is_on() {
-            format!("Status: ON ({}×{} @ {}fps)", self.stats.width, self.stats.height, self.stats.fps)
+            format!(
+                "Status: ON ({}×{} @ {}fps)",
+                self.stats.width, self.stats.height, self.stats.fps
+            )
         } else {
-            format!("Status: OFF ({}×{} @ {}fps)", self.stats.width, self.stats.height, self.stats.fps)
+            format!(
+                "Status: OFF ({}×{} @ {}fps)",
+                self.stats.width, self.stats.height, self.stats.fps
+            )
         };
 
         vec![

@@ -154,11 +154,7 @@ pub fn install_v4l2loopback() -> Result<(), ModuleError> {
         info!("v4l2loopback package installed successfully");
         Ok(())
     } else {
-        Err(ModuleError::InstallFailed(
-            status
-                .code()
-                .unwrap_or(-1),
-        ))
+        Err(ModuleError::InstallFailed(status.code().unwrap_or(-1)))
     }
 }
 
@@ -290,9 +286,10 @@ pub fn find_loopback_device(preferred: &Path) -> Result<PathBuf, LoopbackError> 
         discover_loopback_devices().map_err(|e| LoopbackError::ScanFailed { source: e })?;
 
     // 3. Prefer v4l2loopback devices
+    // Note: the kernel driver name may be "v4l2 loopback" (with space) depending on version.
     let loopback_devices: Vec<_> = all_devices
         .iter()
-        .filter(|d| d.driver == "v4l2loopback")
+        .filter(|d| d.driver == "v4l2 loopback" || d.driver == "v4l2loopback")
         .cloned()
         .collect();
 
@@ -372,55 +369,6 @@ pub fn is_module_loaded() -> bool {
     fs::read_to_string("/proc/modules")
         .map(|c| c.lines().any(|line| line.starts_with("v4l2loopback ")))
         .unwrap_or(false)
-}
-
-/// Attempt to load the v4l2loopback kernel module with optimal settings.
-/// Uses pkexec for privilege escalation (GUI polkit prompt).
-pub fn load_module() -> Result<(), ModuleError> {
-    if is_module_loaded() {
-        return Ok(());
-    }
-
-    info!("v4l2loopback module not loaded; attempting auto-load via pkexec");
-
-    let result = std::process::Command::new("pkexec")
-        .args([
-            "modprobe",
-            "v4l2loopback",
-            "exclusive_caps=1",
-            "card_label=vcam-proxy",
-            "devices=1",
-        ])
-        .output();
-
-    match result {
-        Ok(output) if output.status.success() => {
-            std::thread::sleep(Duration::from_millis(200));
-            if is_module_loaded() {
-                info!("v4l2loopback module loaded successfully");
-                Ok(())
-            } else {
-                Err(ModuleError::LoadFailed {
-                    reason: "modprobe reported success but module not visible in /proc/modules"
-                        .into(),
-                })
-            }
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(ModuleError::LoadFailed {
-                reason: format!(
-                    "pkexec modprobe failed (exit {:?}): {}",
-                    output.status.code(),
-                    stderr.trim()
-                ),
-            })
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(ModuleError::PkexecNotAvailable),
-        Err(e) => Err(ModuleError::LoadFailed {
-            reason: e.to_string(),
-        }),
-    }
 }
 
 /// Load the v4l2loopback kernel module with custom parameters via pkexec.
@@ -506,7 +454,9 @@ pub enum ModuleError {
     #[error("pkexec not available; run manually: sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1")]
     PkexecNotAvailable,
 
-    #[error("cannot auto-install: unsupported Linux distribution. Install v4l2loopback-dkms manually")]
+    #[error(
+        "cannot auto-install: unsupported Linux distribution. Install v4l2loopback-dkms manually"
+    )]
     DistroNotSupported,
 
     #[error("package install failed (exit code {0}); check network and try installing v4l2loopback-dkms manually")]

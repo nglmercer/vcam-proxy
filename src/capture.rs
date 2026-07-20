@@ -71,7 +71,13 @@ pub fn spawn(
         .expect("failed to spawn capture thread")
 }
 
-fn run(cfg: &ResolvedConfig, pool: &BufferPool, tx: &Sender<Frame>, shutdown: &Shutdown, stats: &Stats) {
+fn run(
+    cfg: &ResolvedConfig,
+    pool: &BufferPool,
+    tx: &Sender<Frame>,
+    shutdown: &Shutdown,
+    stats: &Stats,
+) {
     let backoff = Duration::from_millis(cfg.retry_ms);
 
     while !shutdown.is_set() {

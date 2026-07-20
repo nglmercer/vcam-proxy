@@ -132,8 +132,14 @@ impl ResolvedConfig {
         Self {
             camera: cli.camera.unwrap_or(settings.camera),
             sink: cli.sink.unwrap_or(SinkKind::Auto),
-            device: cli.device.clone().unwrap_or_else(|| settings.device.clone()),
-            pipe_name: cli.pipe_name.clone().unwrap_or_else(|| "vcam_proxy_0".to_string()),
+            device: cli
+                .device
+                .clone()
+                .unwrap_or_else(|| settings.device.clone()),
+            pipe_name: cli
+                .pipe_name
+                .clone()
+                .unwrap_or_else(|| "vcam_proxy_0".to_string()),
             width: cli.width.unwrap_or(settings.width),
             height: cli.height.unwrap_or(settings.height),
             fps: cli.fps.unwrap_or(settings.fps),

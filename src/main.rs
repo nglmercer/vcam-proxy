@@ -119,9 +119,15 @@ fn main() {
     let exclusive_caps = cfg.exclusive_caps;
     let multi_reader = cfg.multi_reader;
     let module_params = if multi_reader {
-        format!("exclusive_caps={exclusive_caps} card_label=\"vcam-proxy\" devices=2 timeout={}", cfg.timeout)
+        format!(
+            "exclusive_caps={exclusive_caps} card_label=\"vcam-proxy\" devices=2 timeout={}",
+            cfg.timeout
+        )
     } else {
-        format!("exclusive_caps={exclusive_caps} card_label=\"vcam-proxy\" devices=1 timeout={}", cfg.timeout)
+        format!(
+            "exclusive_caps={exclusive_caps} card_label=\"vcam-proxy\" devices=1 timeout={}",
+            cfg.timeout
+        )
     };
 
     // Optionally auto-load the v4l2loopback module via pkexec FIRST,
@@ -148,7 +154,9 @@ fn main() {
                     }
                     sink::ModuleError::InstallFailed(code) => {
                         eprintln!("Package installation failed (exit code {code}).");
-                        eprintln!("Check your network connection and try again, or install manually.");
+                        eprintln!(
+                            "Check your network connection and try again, or install manually."
+                        );
                     }
                     _ => {
                         eprintln!("Failed to auto-load v4l2loopback module: {e}");
@@ -387,7 +395,9 @@ fn run_setup(cfg: Arc<ResolvedConfig>) {
     } else {
         println!("✗ NOT loaded");
         print!("        Attempting to load via pkexec (with auto-install)... ");
-        match sink::ensure_module_loaded_with_install("exclusive_caps=1 card_label=vcam-proxy devices=1") {
+        match sink::ensure_module_loaded_with_install(
+            "exclusive_caps=1 card_label=vcam-proxy devices=1",
+        ) {
             Ok(()) => {
                 println!("✓ loaded successfully");
                 std::thread::sleep(Duration::from_millis(500));
@@ -420,7 +430,8 @@ fn run_setup(cfg: Arc<ResolvedConfig>) {
             } else {
                 println!("✓ found {} device(s):", devices.len());
                 for dev in &devices {
-                    let marker = if dev.driver == "v4l2loopback" {
+                    let is_loopback = dev.driver == "v4l2 loopback" || dev.driver == "v4l2loopback";
+                    let marker = if is_loopback {
                         " ✓"
                     } else {
                         " (not v4l2loopback)"
@@ -495,16 +506,124 @@ fn print_settings_table(cfg: &ResolvedConfig, settings: &settings::Settings) {
     let sep = "-".repeat(60);
     println!("Current settings (source: [C]LI / [F]ile / [D]efault):");
     println!("{}", sep);
-    println!("  {:<20} {:<15} [{:<1}]", "camera", cfg.camera, if cfg.camera != settings.camera { 'C' } else if cfg.camera != 0 { 'F' } else { 'D' });
-    println!("  {:<20} {:<15} [{:<1}]", "device", cfg.device, if cfg.device != settings.device { 'C' } else { 'D' });
-    println!("  {:<20} {:<15} [{:<1}]", "width", cfg.width, if cfg.width != settings.width { 'C' } else if cfg.width != 1280 { 'F' } else { 'D' });
-    println!("  {:<20} {:<15} [{:<1}]", "height", cfg.height, if cfg.height != settings.height { 'C' } else if cfg.height != 720 { 'F' } else { 'D' });
-    println!("  {:<20} {:<15} [{:<1}]", "fps", cfg.fps, if cfg.fps != settings.fps { 'C' } else if cfg.fps != 30 { 'F' } else { 'D' });
-    println!("  {:<20} {:<15} [{:<1}]", "buffers", cfg.buffers, if cfg.buffers != settings.buffers { 'C' } else if cfg.buffers != 4 { 'F' } else { 'D' });
-    println!("  {:<20} {:<15} [{:<1}]", "retry_ms", cfg.retry_ms, if cfg.retry_ms != settings.retry_ms { 'C' } else if cfg.retry_ms != 1000 { 'F' } else { 'D' });
-    println!("  {:<20} {:<15} [{:<1}]", "multi_reader", cfg.multi_reader, if cfg.multi_reader != settings.multi_reader { 'C' } else if settings.multi_reader { 'F' } else { 'D' });
-    println!("  {:<20} {:<15} [{:<1}]", "exclusive_caps", cfg.exclusive_caps, if cfg.exclusive_caps != settings.exclusive_caps { 'C' } else if settings.exclusive_caps != 1 { 'F' } else { 'D' });
-    println!("  {:<20} {:<15} [{:<1}]", "timeout", cfg.timeout, if cfg.timeout != settings.timeout { 'C' } else if settings.timeout != 1000 { 'F' } else { 'D' });
+    println!(
+        "  {:<20} {:<15} [{:<1}]",
+        "camera",
+        cfg.camera,
+        if cfg.camera != settings.camera {
+            'C'
+        } else if cfg.camera != 0 {
+            'F'
+        } else {
+            'D'
+        }
+    );
+    println!(
+        "  {:<20} {:<15} [{:<1}]",
+        "device",
+        cfg.device,
+        if cfg.device != settings.device {
+            'C'
+        } else {
+            'D'
+        }
+    );
+    println!(
+        "  {:<20} {:<15} [{:<1}]",
+        "width",
+        cfg.width,
+        if cfg.width != settings.width {
+            'C'
+        } else if cfg.width != 1280 {
+            'F'
+        } else {
+            'D'
+        }
+    );
+    println!(
+        "  {:<20} {:<15} [{:<1}]",
+        "height",
+        cfg.height,
+        if cfg.height != settings.height {
+            'C'
+        } else if cfg.height != 720 {
+            'F'
+        } else {
+            'D'
+        }
+    );
+    println!(
+        "  {:<20} {:<15} [{:<1}]",
+        "fps",
+        cfg.fps,
+        if cfg.fps != settings.fps {
+            'C'
+        } else if cfg.fps != 30 {
+            'F'
+        } else {
+            'D'
+        }
+    );
+    println!(
+        "  {:<20} {:<15} [{:<1}]",
+        "buffers",
+        cfg.buffers,
+        if cfg.buffers != settings.buffers {
+            'C'
+        } else if cfg.buffers != 4 {
+            'F'
+        } else {
+            'D'
+        }
+    );
+    println!(
+        "  {:<20} {:<15} [{:<1}]",
+        "retry_ms",
+        cfg.retry_ms,
+        if cfg.retry_ms != settings.retry_ms {
+            'C'
+        } else if cfg.retry_ms != 1000 {
+            'F'
+        } else {
+            'D'
+        }
+    );
+    println!(
+        "  {:<20} {:<15} [{:<1}]",
+        "multi_reader",
+        cfg.multi_reader,
+        if cfg.multi_reader != settings.multi_reader {
+            'C'
+        } else if settings.multi_reader {
+            'F'
+        } else {
+            'D'
+        }
+    );
+    println!(
+        "  {:<20} {:<15} [{:<1}]",
+        "exclusive_caps",
+        cfg.exclusive_caps,
+        if cfg.exclusive_caps != settings.exclusive_caps {
+            'C'
+        } else if settings.exclusive_caps != 1 {
+            'F'
+        } else {
+            'D'
+        }
+    );
+    println!(
+        "  {:<20} {:<15} [{:<1}]",
+        "timeout",
+        cfg.timeout,
+        if cfg.timeout != settings.timeout {
+            'C'
+        } else if settings.timeout != 1000 {
+            'F'
+        } else {
+            'D'
+        }
+    );
     println!("{}", sep);
     println!("\nConfig file: {}", config_path.display());
     println!("To edit: vcam-proxy --edit-config");

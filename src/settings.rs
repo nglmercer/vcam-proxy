@@ -97,8 +97,7 @@ impl Settings {
     /// Get the default config file path.
     /// Uses XDG_CONFIG_HOME or falls back to ~/.config/vcam-proxy/config.toml
     pub fn config_path() -> PathBuf {
-        let base = dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
         base.join("vcam-proxy").join("config.toml")
     }
 
