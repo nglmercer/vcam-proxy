@@ -1,7 +1,5 @@
 //! Resolution scaling support for v4l2loopback output.
 
-use crate::frame::PixelFormat;
-
 /// Pre-computed index LUT for fast nearest-neighbor scaling.
 pub struct ScaleLUT {
     /// Maps dst x -> src x for Y plane
@@ -108,14 +106,4 @@ impl ScaleContext {
     }
 }
 
-/// Convert a V4L2 FourCC byte array to our PixelFormat.
-/// Returns None for formats we don't support.
-pub(crate) fn fourcc_to_pixel_format(fourcc: &[u8; 4]) -> Option<PixelFormat> {
-    match fourcc {
-        b"YUYV" => Some(PixelFormat::Yuy2),
-        b"RGB3" => Some(PixelFormat::Rgb24),
-        b"NV12" => Some(PixelFormat::Nv12),
-        b"MJPG" => Some(PixelFormat::Mjpeg),
-        _ => None,
-    }
-}
+

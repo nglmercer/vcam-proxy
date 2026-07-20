@@ -19,11 +19,6 @@ use super::discovery::is_loopback_driver;
 /// Kernel buffers requested from the loopback driver. More buffers help when
 /// multiple readers (OBS + browser) drain at slightly different rates.
 pub(crate) const NUM_KBUF: u32 = 4;
-/// Bound on QBUF/DQBUF waits so the thread stays responsive to shutdown and
-/// to a missing consumer (v4l2loopback only drains output buffers while a
-/// reader is attached).
-pub(crate) const POLL_TIMEOUT_MS: u64 = 500;
-
 /// v4l2loopback control IDs for keep_format, sustain_framerate, timeout.
 pub(crate) const CID_KEEP_FORMAT: u32 = 0x00982000 + 1;
 pub(crate) const CID_SUSTAIN_FRAMERATE: u32 = 0x00982000 + 2;

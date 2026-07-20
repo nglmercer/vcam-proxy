@@ -36,9 +36,9 @@ pub mod sink;
 
 // Re-export main types for convenience
 pub use module::count_loopback_devices;
-pub use discovery::{DeviceInfo, discover_loopback_devices, find_loopback_device, is_loopback_driver, LoopbackError};
+pub use discovery::{discover_loopback_devices, find_loopback_device, is_loopback_driver, LoopbackError};
 pub use module::{ensure_module_loaded_with_install, is_module_loaded, ModuleError};
-pub use module_ops::{load_module_with_params, load_module_with_params_force, unload_module};
+pub use module_ops::load_module_with_params_force;
 pub use permissions::{check_device_access, exclusive_caps_active, AccessError};
 pub use sink::V4l2LoopSink;
 pub use multi_sink::V4l2LoopMultiSink;

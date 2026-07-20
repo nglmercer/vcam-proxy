@@ -30,8 +30,6 @@ pub fn count_loopback_devices() -> usize {
 /// Error type for module management operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ModuleError {
-    #[error("v4l2loopback module is not loaded; run: sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1")]
-    NotLoaded,
     #[error("module load failed: {reason}")]
     LoadFailed { reason: String },
     #[error("pkexec not available; run manually: sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1")]
@@ -56,11 +54,10 @@ pub fn ensure_module_loaded_with_install(params: &str) -> Result<(), ModuleError
     // First attempt: modprobe (module may already be built but unloaded).
     match load_module_with_params(params) {
         Ok(()) => return Ok(()),
-        Err(e) if matches!(e, ModuleError::NotLoaded) => {
+        Err(_) => {
             // Module likely not installed at all → try to install it.
             warn!("modprobe failed; v4l2loopback may not be installed");
         }
-        Err(e) => return Err(e),
     }
 
     // Auto-install and retry.
