@@ -43,10 +43,17 @@ impl Active {
         if let Ok(caps) = dev.query_caps() {
             info!(driver = %caps.driver, card = %caps.card, bus = %caps.bus, "output device");
             if !is_loopback_driver(&caps.driver) {
-                warn!(
-                    driver = %caps.driver,
-                    "device is not v4l2loopback; browsers may not list it as a camera"
-                );
+                // Discovery should have filtered this out already; if we still
+                // land here, writes would fail — treat it as a hard error
+                // instead of streaming black frames into the wrong device.
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "{} is driven by '{}' (not v4l2loopback); refusing to use it as a virtual camera",
+                        path.display(),
+                        caps.driver
+                    ),
+                ));
             }
         }
 
@@ -68,6 +75,27 @@ impl Active {
         };
         dev.set_format(&format)?;
 
+        // S_FMT is a negotiation: read back what the driver ACTUALLY applied
+        // so frame-size checks and scaling target the real on-the-wire
+        // geometry instead of the requested one.
+        let actual = dev.get_format()?;
+        if actual.fourcc != fourcc {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "driver rejected pixel format {:?} (selected {} instead)",
+                    fmt, actual.fourcc
+                ),
+            ));
+        }
+        if actual.width != width || actual.height != height {
+            warn!(
+                requested = %format_args!("{width}x{height}"),
+                actual = %format_args!("{}x{}", actual.width, actual.height),
+                "driver adjusted output resolution; frames will be scaled"
+            );
+        }
+
         // Re-enable keep_format + sustain_framerate so the virtual camera keeps advertising
         // a fixed format to CAPTURE clients (Chrome, Firefox, Zoom) between attaches.
         apply_loopback_controls(&dev);
@@ -77,7 +105,7 @@ impl Active {
         Ok(Active {
             stream,
             dev,
-            negotiated: (width, height, fmt),
+            negotiated: (actual.width, actual.height, fmt),
         })
     }
 
@@ -109,6 +137,19 @@ impl Active {
                     ),
                 ));
             }
+        }
+        // Never overrun the kernel-mapped buffer (e.g. if the driver handed
+        // back a smaller sizeimage than the frame needs) — error out instead
+        // of panicking on the slice copy.
+        if payload.len() > buf.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "frame ({} B) exceeds kernel output buffer ({} B)",
+                    payload.len(),
+                    buf.len()
+                ),
+            ));
         }
         buf[..payload.len()].copy_from_slice(payload);
         Ok(())

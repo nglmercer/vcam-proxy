@@ -109,6 +109,7 @@ struct App {
     retry_text: String,
     timeout_text: String,
     exclusive_caps_text: String,
+    devices_text: String,
     status: String,
 }
 
@@ -126,6 +127,7 @@ impl App {
         let retry_text = cfg.retry_ms.to_string();
         let timeout_text = cfg.timeout.to_string();
         let exclusive_caps_text = cfg.exclusive_caps.to_string();
+        let devices_text = cfg.devices.to_string();
         drop(s);
         Self {
             state,
@@ -140,6 +142,7 @@ impl App {
             retry_text,
             timeout_text,
             exclusive_caps_text,
+            devices_text,
             status: String::new(),
         }
     }
@@ -179,6 +182,10 @@ impl App {
             .exclusive_caps_text
             .parse()
             .map_err(|_| "exclusive_caps must be 0 or 1".to_string())?;
+        cfg.devices = self
+            .devices_text
+            .parse()
+            .map_err(|_| "devices must be a number (1-8)".to_string())?;
         cfg.device = self.device_text.clone();
         Ok(())
     }
@@ -299,7 +306,7 @@ impl eframe::App for App {
                             });
                     });
                     ui.label(
-                        "“Auto” keeps browser-safe formats (YUYV/NV12). RGB24 is rejected by Chrome/Firefox.",
+                        "“Auto” always outputs YUYV — accepted by every app (Chrome, Firefox, Zoom, OBS).",
                     );
                 });
 
@@ -315,7 +322,14 @@ impl eframe::App for App {
                 });
 
                 ui.collapsing("Multi-reader / module", |ui| {
-                    ui.checkbox(&mut desired.multi_reader, "Multi-reader mode (multiple apps at once)");
+                    ui.checkbox(
+                        &mut desired.multi_reader,
+                        "Multi-reader mode (multiple apps at once, single node)",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("Device nodes (1-8)");
+                        ui.text_edit_singleline(&mut self.devices_text);
+                    });
                     ui.horizontal(|ui| {
                         ui.label("exclusive_caps (0/1)");
                         ui.text_edit_singleline(&mut self.exclusive_caps_text);
@@ -325,7 +339,9 @@ impl eframe::App for App {
                         ui.text_edit_singleline(&mut self.timeout_text);
                     });
                     ui.label(
-                        "exclusive_caps=1 is required for Chrome/Firefox/Zoom to list the device as a camera.",
+                        "One node already serves multiple apps at once. Use 2+ nodes only for \
+                         apps that grab a device exclusively (requires module reload).\n\
+                         exclusive_caps=1 is required for Chrome/Firefox/Zoom to list the device as a camera.",
                     );
                 });
             });
@@ -413,6 +429,7 @@ pub fn settings_to_resolved(s: &Settings) -> ResolvedConfig {
         buffers: s.buffers,
         retry_ms: s.retry_ms,
         multi_reader: s.multi_reader,
+        devices: s.devices,
         exclusive_caps: s.exclusive_caps,
         timeout: s.timeout,
         auto_resolution: false,

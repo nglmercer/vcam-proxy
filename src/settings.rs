@@ -14,6 +14,7 @@
 //! format = "auto"
 //! retry_ms = 1000
 //! multi_reader = true
+//! devices = 1
 //! exclusive_caps = 1
 //! ```
 
@@ -52,12 +53,20 @@ pub struct Settings {
     /// Backoff between camera re-open attempts (ms).
     #[serde(default = "default_retry_ms")]
     pub retry_ms: u64,
-    /// Enable multi-reader mode (multiple apps can use the virtual camera).
+    /// Allow multiple apps to read the virtual camera at the same time.
+    /// A single v4l2loopback device node natively supports many concurrent
+    /// readers; no extra nodes are needed for Chrome + Zoom + OBS at once.
     #[serde(default = "default_multi_reader")]
     pub multi_reader: bool,
+    /// Number of v4l2loopback device nodes to feed (multi-node mode).
+    /// 1 = a single virtual camera (default). >=2 writes the feed to N
+    /// isolated nodes for apps that grab a device exclusively.
+    #[serde(default = "default_devices")]
+    pub devices: u32,
     /// v4l2loopback exclusive_caps parameter (0 or 1).
-    /// Set to 1 for UVC-compatible single-app mode (Chrome/Zoom recognize it as camera).
-    /// Set to 0 for broader compatibility (allows multiple simultaneous readers).
+    /// Controls capability advertisement only (CAPTURE-only while a producer
+    /// is attached, so browsers list the node as a camera). It does NOT limit
+    /// the number of concurrent readers. Keep at 1.
     #[serde(default = "default_exclusive_caps")]
     pub exclusive_caps: u32,
     /// v4l2loopback timeout in ms (how long frames persist without a reader).
@@ -86,6 +95,9 @@ fn default_retry_ms() -> u64 {
 fn default_multi_reader() -> bool {
     true
 }
+fn default_devices() -> u32 {
+    1
+}
 fn default_exclusive_caps() -> u32 {
     1
 }
@@ -111,6 +123,7 @@ impl Default for Settings {
             format: FormatPref::default(),
             retry_ms: default_retry_ms(),
             multi_reader: default_multi_reader(),
+            devices: default_devices(),
             exclusive_caps: default_exclusive_caps(),
             timeout: default_timeout(),
         }

@@ -47,8 +47,10 @@ pub struct Config {
     pub fps: Option<u32>,
 
     /// Wire format policy for the virtual camera.
-    /// `auto` keeps browser-safe formats: YUYV/NV12 passthrough, MJPEG→NV12
-    /// (never RGB24 — Chrome/Firefox reject RGB loopback devices).
+    /// `auto` always outputs YUYV — the only format accepted by every app
+    /// (Chrome, Firefox, Zoom, Teams, OBS). NV12 is rejected by Zoom and some
+    /// Firefox builds; RGB24 is rejected by Chrome/Firefox; MJPEG loopback
+    /// fails in most apps. Use explicit values only if you know your consumer.
     #[arg(long, value_enum)]
     pub format: Option<FormatPref>,
 
@@ -91,9 +93,19 @@ pub struct Config {
     #[arg(long)]
     pub setup: bool,
 
-    /// Enable multi-reader mode (multiple apps can use virtual camera).
-    #[arg(long)]
+    /// Allow multiple apps to read the virtual camera at the same time
+    /// (native v4l2loopback multi-reader on a single device node).
+    /// Accepts an optional value: `--multi-reader`, `--multi-reader true|false`.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     pub multi_reader: Option<bool>,
+
+    /// Number of v4l2loopback device nodes to feed (multi-node mode).
+    /// 1 (default) = a single virtual camera; multiple apps can still open it
+    /// concurrently. >=2 = write the feed to N isolated nodes, for apps that
+    /// grab a device exclusively. May require a module reload (pkexec prompt)
+    /// and apps using the virtual camera must re-open it afterwards.
+    #[arg(long)]
+    pub devices: Option<u32>,
 
     /// v4l2loopback exclusive_caps value (0 or 1).
     /// 1 = required for Chrome/Firefox/Zoom to list the device as a camera
@@ -134,6 +146,8 @@ pub struct ResolvedConfig {
     pub buffers: usize,
     pub retry_ms: u64,
     pub multi_reader: bool,
+    /// Number of v4l2loopback device nodes to feed (1 = single node).
+    pub devices: u32,
     pub exclusive_caps: u32,
     pub timeout: u32,
     /// When true, the capture thread ignores `width`/`height`/`fps` and instead
@@ -165,6 +179,7 @@ impl ResolvedConfig {
             buffers: cli.buffers.unwrap_or(settings.buffers),
             retry_ms: cli.retry_ms.unwrap_or(settings.retry_ms),
             multi_reader: cli.multi_reader.unwrap_or(settings.multi_reader),
+            devices: cli.devices.unwrap_or(settings.devices),
             exclusive_caps: cli.exclusive_caps.unwrap_or(settings.exclusive_caps),
             timeout: cli.timeout.unwrap_or(settings.timeout),
             // Auto-pick the camera's max resolution unless the user pinned a
@@ -204,6 +219,7 @@ impl ResolvedConfig {
             format: self.format,
             retry_ms: self.retry_ms,
             multi_reader: self.multi_reader,
+            devices: self.devices,
             exclusive_caps: self.exclusive_caps,
             timeout: self.timeout,
         }

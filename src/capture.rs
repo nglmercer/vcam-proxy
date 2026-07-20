@@ -316,10 +316,13 @@ fn capture_loop(
 
 /// Convert/copy a raw camera buffer into a pooled frame.
 ///
-/// **Wire-format policy for browsers**: Chrome/Firefox WebRTC (and most
-/// PipeWire camera portals) accept YUYV and NV12 from a v4l2loopback device,
-/// but reject RGB24 and often fail on MJPEG loopback. Auto therefore never
-/// emits RGB24 or MJPEG on the virtual camera — it always lands on YUYV/NV12.
+/// **Wire-format policy**: YUYV is the only pixel format accepted by *every*
+/// consumer of a v4l2loopback device — Chrome, Firefox, Zoom, Teams, OBS and
+/// the PipeWire camera portal all capture YUYV. NV12 works in Chrome/OBS but
+/// is rejected by Zoom and some Firefox builds (camera opens, picture stays
+/// black); RGB24 is rejected by Chrome/Firefox and MJPEG loopback fails in
+/// most apps. Auto therefore always lands on YUYV, whatever the camera's
+/// source format. NV12/RGB24/MJPEG remain available via explicit `--format`.
 ///
 /// Returns `Ok(false)` for source formats we cannot serve.
 fn fill(frame: &mut Frame, raw: &Buffer, pref: FormatPref) -> Result<bool, NokhwaError> {
@@ -359,15 +362,17 @@ fn fill(frame: &mut Frame, raw: &Buffer, pref: FormatPref) -> Result<bool, Nokhw
             FormatPref::Mjpeg => return Ok(false),
         },
         FrameFormat::NV12 => match pref {
-            // NV12 is browser-friendly: Auto / Nv12 pass it through.
-            FormatPref::Auto | FormatPref::Nv12 => {
+            // Explicit Nv12 keeps the zero-conversion passthrough.
+            FormatPref::Nv12 => {
                 if PixelFormat::Nv12.packed_size(w, h) != Some(src.len()) {
                     return Ok(false);
                 }
                 passthrough(frame, PixelFormat::Nv12)
             }
-            FormatPref::Yuy2 => {
-                // NV12→YUYV via RGB scratch (rare path).
+            FormatPref::Auto | FormatPref::Yuy2 => {
+                // Auto normalizes to YUYV (universally accepted; NV12 is
+                // rejected by Zoom and some Firefox builds). NV12→YUYV via
+                // the RGB scratch buffer.
                 if !decode_plane_to_yuy2(frame, |rgb| convert::nv12_to_rgb24(src, rgb, w, h), w, h)
                 {
                     return Ok(false);
@@ -386,15 +391,15 @@ fn fill(frame: &mut Frame, raw: &Buffer, pref: FormatPref) -> Result<bool, Nokhw
             // Compressed passthrough only when the user explicitly asked for
             // it — browsers usually cannot open MJPEG loopback devices.
             FormatPref::Mjpeg => passthrough(frame, PixelFormat::Mjpeg),
-            // Auto / Nv12: MJPEG → NV12 (half the bandwidth of YUYV, accepted
-            // by Chrome/Firefox). Explicit Yuy2 forces YUYV instead.
-            FormatPref::Auto | FormatPref::Nv12 => {
-                if !decode_mjpeg_to(frame, raw, w, h, PixelFormat::Nv12)? {
+            // Auto: MJPEG → YUYV (universally accepted). Explicit Nv12 keeps
+            // the smaller NV12 wire format.
+            FormatPref::Auto | FormatPref::Yuy2 => {
+                if !decode_mjpeg_to(frame, raw, w, h, PixelFormat::Yuy2)? {
                     return Ok(false);
                 }
             }
-            FormatPref::Yuy2 => {
-                if !decode_mjpeg_to(frame, raw, w, h, PixelFormat::Yuy2)? {
+            FormatPref::Nv12 => {
+                if !decode_mjpeg_to(frame, raw, w, h, PixelFormat::Nv12)? {
                     return Ok(false);
                 }
             }
@@ -407,14 +412,15 @@ fn fill(frame: &mut Frame, raw: &Buffer, pref: FormatPref) -> Result<bool, Nokhw
         other => {
             debug!(?other, "uncommon source format; decoding via RGB");
             match pref {
-                // Keep the virtual cam browser-safe even for exotic sources.
-                FormatPref::Auto | FormatPref::Nv12 => {
-                    if !decode_mjpeg_to(frame, raw, w, h, PixelFormat::Nv12)? {
+                // Keep the virtual cam universally readable even for exotic
+                // sources: Auto normalizes to YUYV.
+                FormatPref::Auto | FormatPref::Yuy2 => {
+                    if !decode_mjpeg_to(frame, raw, w, h, PixelFormat::Yuy2)? {
                         return Ok(false);
                     }
                 }
-                FormatPref::Yuy2 => {
-                    if !decode_mjpeg_to(frame, raw, w, h, PixelFormat::Yuy2)? {
+                FormatPref::Nv12 => {
+                    if !decode_mjpeg_to(frame, raw, w, h, PixelFormat::Nv12)? {
                         return Ok(false);
                     }
                 }
