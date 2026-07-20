@@ -67,6 +67,33 @@ fn main() {
         return run_dry_run(cfg);
     }
 
+    // Optionally auto-load the v4l2loopback module via pkexec FIRST,
+    // before trying to find a device. This way --auto-load-module has
+    // a chance to create the /dev/video* node we need.
+    if cfg.auto_load_module && !sink::is_module_loaded() {
+        info!("attempting to auto-load v4l2loopback module");
+        match sink::load_module() {
+            Ok(()) => {
+                // Module loaded — give kernel a moment to create device nodes
+                std::thread::sleep(Duration::from_millis(500));
+                info!("v4l2loopback module loaded; device should appear shortly");
+            }
+            Err(e) => {
+                match &e {
+                    sink::ModuleError::PkexecNotAvailable => {
+                        eprintln!(
+                            "Note: pkexec not available. Run manually:\n  sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1"
+                        );
+                    }
+                    _ => {
+                        eprintln!("Failed to auto-load v4l2loopback module: {e}");
+                    }
+                }
+                eprintln!("\nYou can also load it manually:\n  sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1");
+            }
+        }
+    }
+
     // Determine the loopback device to use (auto-detect if needed).
     let loopback_path = match sink::find_loopback_device(Path::new(&cfg.device)) {
         Ok(path) => path,
@@ -79,7 +106,7 @@ fn main() {
                          To create one, run:\n\
                            sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1\n\
                          \n\
-                         Or use --auto-load-module to attempt automatic loading."
+                         Then verify with: vcam-proxy --list-loopback"
                     );
                 }
                 sink::LoopbackError::ScanFailed { source } => {
@@ -89,27 +116,6 @@ fn main() {
             std::process::exit(1);
         }
     };
-
-    // Optionally auto-load the v4l2loopback module via pkexec.
-    if cfg.auto_load_module && !sink::is_module_loaded() {
-        if let Err(e) = sink::load_module() {
-            match &e {
-                sink::ModuleError::PkexecNotAvailable => {
-                    eprintln!(
-                        "Note: pkexec not available. Run manually:\n  sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1"
-                    );
-                }
-                _ => {
-                    eprintln!("Failed to auto-load v4l2loopback module: {e}");
-                }
-            }
-        }
-        // Re-discover device after loading module
-        if sink::find_loopback_device(Path::new(&cfg.device)).is_err() {
-            eprintln!("Still no loopback device after module load");
-            std::process::exit(1);
-        }
-    }
 
     // Check permissions before opening device.
     if let Err(e) = sink::check_device_access(&loopback_path) {
