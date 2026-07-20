@@ -25,10 +25,8 @@ pub use v4l2loop::{
     check_device_access, count_loopback_devices, discover_loopback_devices,
     ensure_module_loaded_with_install, exclusive_caps_active, find_loopback_device,
     is_loopback_driver, is_module_loaded, load_module_with_params_force,
+    AccessError, LoopbackError, ModuleError, V4l2LoopSink, V4l2LoopMultiSink,
 };
-// unload_module is available via v4l2loop::unload_module if needed
-#[cfg(target_os = "linux")]
-pub use v4l2loop::{AccessError, LoopbackError, ModuleError};
 
 pub trait Sink: Send {
     /// Write one frame. `WouldBlock` signals "no consumer attached / reader
