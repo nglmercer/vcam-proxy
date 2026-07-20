@@ -256,4 +256,16 @@ mod tests {
         let mut dst = [0u8; 3 * 3 * 3 / 2 + 1];
         assert!(!rgb24_to_nv12(&src, &mut dst, 3, 3));
     }
+
+    #[test]
+    fn rgb24_to_yuy2_gray() {
+        let src = [128u8; 2 * 2 * 3];
+        let mut dst = [0u8; 2 * 2 * 2];
+        assert!(rgb24_to_yuy2(&src, &mut dst, 2, 2));
+        // Y samples ~126, U/V ~128 for mid-gray.
+        assert!((dst[0] as i32 - 126).abs() <= 3, "Y0={}", dst[0]);
+        assert!((dst[1] as i32 - 128).abs() <= 2, "U={}", dst[1]);
+        assert!((dst[2] as i32 - 126).abs() <= 3, "Y1={}", dst[2]);
+        assert!((dst[3] as i32 - 128).abs() <= 2, "V={}", dst[3]);
+    }
 }

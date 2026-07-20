@@ -106,8 +106,21 @@ fn main() {
         buffers = cfg.buffers,
         multi_reader = cfg.multi_reader,
         exclusive_caps = cfg.exclusive_caps,
+        auto_resolution = cfg.auto_resolution,
         "starting vcam-proxy"
     );
+
+    if matches!(
+        cfg.format,
+        config::FormatPref::Rgb24 | config::FormatPref::Mjpeg
+    ) {
+        tracing::warn!(
+            format = ?cfg.format,
+            "wire format {:?} is often rejected by browsers; prefer --format auto \
+             (YUYV/NV12) for Chrome/Firefox/Zoom",
+            cfg.format
+        );
+    }
 
     // Handle dry-run mode: no loopback output, just test capture.
     if cli.dry_run {
@@ -116,19 +129,37 @@ fn main() {
     }
 
     // Build the module parameters based on multi-reader setting.
+    // max_buffers>=4 + max_openers helps OBS + browser share the same node.
+    // exclusive_caps=1 is required for Chrome/Firefox to list the device as a
+    // camera (they refuse nodes that advertise both CAPTURE and OUTPUT).
     let exclusive_caps = cfg.exclusive_caps;
     let multi_reader = cfg.multi_reader;
-    let module_params = if multi_reader {
-        format!(
-            "exclusive_caps={exclusive_caps} card_label=\"vcam-proxy\" devices=2 timeout={}",
-            cfg.timeout
-        )
-    } else {
-        format!(
-            "exclusive_caps={exclusive_caps} card_label=\"vcam-proxy\" devices=1 timeout={}",
-            cfg.timeout
-        )
-    };
+    let devices = if multi_reader { 2 } else { 1 };
+    let module_params = format!(
+        "exclusive_caps={exclusive_caps} card_label=\"vcam-proxy\" devices={devices} \
+         max_buffers=4 max_openers=10 timeout={}",
+        cfg.timeout
+    );
+
+    // If the module is already loaded without exclusive_caps, browsers will
+    // never see the virtual camera. Warn loudly so the user reloads it.
+    if sink::is_module_loaded() {
+        match sink::exclusive_caps_active() {
+            Some(false) => {
+                eprintln!(
+                    "WARNING: v4l2loopback is loaded with exclusive_caps=0.\n\
+                     Chrome, Firefox, Zoom, and Teams will NOT list the virtual camera.\n\
+                     OBS may still work. Reload the module:\n\
+                       sudo modprobe -r v4l2loopback\n\
+                       sudo modprobe v4l2loopback {module_params}"
+                );
+            }
+            Some(true) => {
+                info!("v4l2loopback exclusive_caps is active (browser-compatible)");
+            }
+            None => {}
+        }
+    }
 
     // Optionally auto-load the v4l2loopback module via pkexec FIRST,
     // before trying to find a device. This way --auto-load-module has
@@ -308,7 +339,9 @@ fn list_loopback_devices() {
             }
             println!("Video output devices ({} found):", devices.len());
             for dev in &devices {
-                let is_loopback = dev.driver == "v4l2loopback";
+                // Kernel reports "v4l2 loopback" (with space) on most builds.
+                let is_loopback =
+                    dev.driver == "v4l2loopback" || dev.driver == "v4l2 loopback";
                 println!(
                     "  {} {}{}",
                     dev.path.display(),

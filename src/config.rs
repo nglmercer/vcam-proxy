@@ -46,8 +46,9 @@ pub struct Config {
     #[arg(long)]
     pub fps: Option<u32>,
 
-    /// Wire format policy. `auto` passes YUYV through untouched (zero
-    /// conversion) and decodes MJPEG/NV12 sources to RGB24.
+    /// Wire format policy for the virtual camera.
+    /// `auto` keeps browser-safe formats: YUYV/NV12 passthrough, MJPEG→NV12
+    /// (never RGB24 — Chrome/Firefox reject RGB loopback devices).
     #[arg(long, value_enum)]
     pub format: Option<FormatPref>,
 
@@ -85,8 +86,9 @@ pub struct Config {
     pub multi_reader: Option<bool>,
 
     /// v4l2loopback exclusive_caps value (0 or 1).
-    /// 1 = UVC-compatible (apps recognize as camera, but some may get exclusive access).
-    /// 0 = broader compatibility (allows multiple simultaneous readers).
+    /// 1 = required for Chrome/Firefox/Zoom to list the device as a camera
+    ///     (hides OUTPUT caps from consumers). Keep this at 1.
+    /// 0 = device advertises both CAPTURE+OUTPUT; browsers usually ignore it.
     #[arg(long)]
     pub exclusive_caps: Option<u32>,
 

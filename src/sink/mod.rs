@@ -23,7 +23,7 @@ pub mod winpipe;
 #[cfg(target_os = "linux")]
 pub use v4l2loop::{
     check_device_access, discover_loopback_devices, ensure_module_loaded_with_install,
-    find_loopback_device, is_module_loaded,
+    exclusive_caps_active, find_loopback_device, is_module_loaded,
 };
 #[cfg(target_os = "linux")]
 pub use v4l2loop::{AccessError, LoopbackError, ModuleError};
