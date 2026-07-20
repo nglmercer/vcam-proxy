@@ -70,6 +70,11 @@ pub struct Config {
     /// Auto-load the v4l2loopback kernel module via pkexec if not present.
     #[arg(long)]
     pub auto_load_module: bool,
+
+    /// Auto-setup mode: check system, load module, fix permissions, validate.
+    /// Exits after setup — does not start the proxy.
+    #[arg(long)]
+    pub setup: bool,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

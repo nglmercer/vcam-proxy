@@ -6,6 +6,7 @@
 //! - Anywhere: `null` — discards frames (benchmarking / dry runs).
 
 use std::io;
+use std::path::Path;
 
 use tracing::warn;
 
@@ -35,7 +36,7 @@ pub trait Sink: Send {
     fn describe(&self) -> String;
 }
 
-pub fn build(cfg: &Config) -> Box<dyn Sink> {
+pub fn build_with_path(cfg: &Config, path: &Path) -> Box<dyn Sink> {
     let kind = match cfg.sink {
         SinkKind::Auto => {
             #[cfg(target_os = "linux")]
@@ -59,7 +60,7 @@ pub fn build(cfg: &Config) -> Box<dyn Sink> {
         SinkKind::V4l2 => {
             #[cfg(target_os = "linux")]
             {
-                Box::new(v4l2loop::V4l2LoopSink::new(&cfg.device))
+                Box::new(v4l2loop::V4l2LoopSink::new(path.to_path_buf()))
             }
             #[cfg(not(target_os = "linux"))]
             {

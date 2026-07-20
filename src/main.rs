@@ -55,6 +55,12 @@ fn main() {
         return;
     }
 
+    // Handle --setup: auto-configure system, then exit.
+    if cfg.setup {
+        run_setup(cfg);
+        return;
+    }
+
     info!(
         camera = cfg.camera,
         width = cfg.width,
@@ -165,6 +171,7 @@ fn main() {
     let stats = Arc::new(Stats::default());
     let sink_handle = pipeline::spawn_sink(
         cfg.clone(),
+        loopback_path,
         rx,
         pool.clone(),
         shutdown.clone(),
@@ -308,4 +315,115 @@ fn run_dry_run(cfg: Arc<Config>, shutdown: Shutdown) {
     join_with_timeout("capture", capture_handle, Duration::from_secs(3));
     let total = drain_handle.join().unwrap_or(0);
     info!(total_frames = total, "dry-run complete");
+}
+
+/// Run automatic setup: check system, load module, fix permissions, validate.
+/// Prints actionable guidance and exits.
+fn run_setup(cfg: Arc<Config>) {
+    println!("=== vcam-proxy automatic setup ===\n");
+
+    let mut ok = true;
+
+    // 1. Check if v4l2loopback module is loaded
+    print!("[1/4] Checking v4l2loopback kernel module... ");
+    if sink::is_module_loaded() {
+        println!("✓ already loaded");
+    } else {
+        println!("✗ NOT loaded");
+        print!("        Attempting to load via pkexec... ");
+        match sink::load_module() {
+            Ok(()) => {
+                println!("✓ loaded successfully");
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(e) => {
+                println!("✗ failed: {e}");
+                ok = false;
+                println!("\n        → Load it manually with:");
+                println!("          sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1");
+                println!("\n        → To load at boot, create /etc/modules-load.d/v4l2loopback.conf with:");
+                println!("          v4l2loopback");
+                println!("\n        → And /etc/modprobe.d/v4l2loopback.conf with:");
+                println!("          options v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1");
+            }
+        }
+    }
+
+    // 2. Discover devices
+    print!("\n[2/4] Scanning for video output devices... ");
+    match sink::discover_loopback_devices() {
+        Ok(devices) => {
+            if devices.is_empty() {
+                println!("✗ none found");
+                ok = false;
+            } else {
+                println!("✓ found {} device(s):", devices.len());
+                for dev in &devices {
+                    let marker = if dev.driver == "v4l2loopback" {
+                        " ✓"
+                    } else {
+                        " (not v4l2loopback)"
+                    };
+                    println!("        - {} [{}]{}", dev.path.display(), dev.card, marker);
+                }
+            }
+        }
+        Err(e) => {
+            println!("✗ scan failed: {e}");
+            ok = false;
+        }
+    }
+
+    // 3. Check permissions
+    print!("\n[3/4] Checking device permissions... ");
+    let target = std::path::PathBuf::from(&cfg.device);
+    if !target.exists() {
+        // Try to find any loopback device to test
+        match sink::discover_loopback_devices() {
+            Ok(devices) if !devices.is_empty() => {
+                let path = &devices[0].path;
+                print!("(testing {}) ", path.display());
+                match sink::check_device_access(path) {
+                    Ok(()) => println!("✓ accessible"),
+                    Err(e) => {
+                        println!("✗ {e}");
+                        ok = false;
+                        print_permissions_help();
+                    }
+                }
+            }
+            _ => {
+                println!("? no device to test (load module first)");
+            }
+        }
+    } else {
+        match sink::check_device_access(&target) {
+            Ok(()) => println!("✓ accessible"),
+            Err(e) => {
+                println!("✗ {e}");
+                ok = false;
+                print_permissions_help();
+            }
+        }
+    }
+
+    // 4. Summary
+    println!("\n[4/4] Summary");
+    if ok {
+        println!("        ✓ Everything looks good! You can now run:");
+        println!("          cargo run -- --auto-load-module");
+        println!("        Or just:");
+        println!("          cargo run --release");
+    } else {
+        println!("        ✗ Some issues need fixing. See above for guidance.");
+        println!("        After fixing, run this command again to verify.");
+    }
+    println!("\n=== setup complete ===");
+}
+
+fn print_permissions_help() {
+    println!("\n        → Fix permissions with:");
+    println!("          sudo usermod -aG video $USER");
+    println!("        → Then LOG OUT and log back in for the group change to take effect.");
+    println!("        → Verify with: groups | grep video");
 }

@@ -3,6 +3,7 @@
 //! statistics counters and the periodic throughput report.
 
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -25,6 +26,7 @@ pub struct Stats {
 
 pub fn spawn_sink(
     cfg: Arc<Config>,
+    loopback_path: PathBuf,
     rx: Receiver<Frame>,
     pool: BufferPool,
     shutdown: Shutdown,
@@ -33,19 +35,30 @@ pub fn spawn_sink(
 ) -> JoinHandle<()> {
     thread::Builder::new()
         .name("sink".into())
-        .spawn(move || run(&cfg, &rx, &pool, &shutdown, &stats, &sink_switch))
+        .spawn(move || {
+            run(
+                &cfg,
+                &loopback_path,
+                &rx,
+                &pool,
+                &shutdown,
+                &stats,
+                &sink_switch,
+            )
+        })
         .expect("failed to spawn sink thread")
 }
 
 fn run(
     cfg: &Config,
+    loopback_path: &Path,
     rx: &Receiver<Frame>,
     pool: &BufferPool,
     shutdown: &Shutdown,
     stats: &Stats,
     sink_switch: &crate::tray::SinkSwitch,
 ) {
-    let mut sink = sink::build(cfg);
+    let mut sink = sink::build_with_path(cfg, loopback_path);
     info!(sink = %sink.describe(), "sink ready");
 
     let mut last = Instant::now();
