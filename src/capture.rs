@@ -136,8 +136,30 @@ fn capture_loop(
 ) -> Result<(), NokhwaError> {
     let mut seq = 0u64;
 
-    while !shutdown.is_set() {
-        let raw = cam.frame()?; // blocks at camera frame rate
+    loop {
+        // Shutdown check BEFORE the blocking frame read.
+        if shutdown.is_set() {
+            break;
+        }
+
+        // cam.frame() blocks at the camera frame rate. Errors other than
+        // ReadError propagate up (camera re-open handled by caller).
+        let raw = match cam.frame() {
+            Ok(raw) => raw,
+            Err(NokhwaError::ReadFrameError(_)) => {
+                // Transient read error — retry after a brief sleep.
+                // The sleep is short so shutdown stays responsive.
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+
+        // Shutdown check AFTER the frame — exit quickly if signaled.
+        if shutdown.is_set() {
+            break;
+        }
+
         let res = raw.resolution();
 
         // No free slot -> the sink is behind; drop at the source instead of
@@ -151,9 +173,9 @@ fn capture_loop(
             Ok(true) => {
                 frame.width = res.width();
                 frame.height = res.height();
+                seq += 1;
                 frame.seq = seq;
                 frame.ts = Instant::now();
-                seq += 1;
                 stats.captured.fetch_add(1, Ordering::Relaxed);
 
                 match tx.try_send(frame) {

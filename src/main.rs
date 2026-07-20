@@ -38,6 +38,10 @@ fn main() {
         )
         .init();
 
+    // Install shutdown handler ONCE at startup. All modes (normal, dry-run,
+    // etc.) share this same flag so Ctrl+C works consistently.
+    let shutdown = Shutdown::install();
+
     let cfg = Arc::new(Config::parse());
 
     if cfg.list {
@@ -64,7 +68,7 @@ fn main() {
     // Handle dry-run mode: no loopback output, just test capture.
     if cfg.dry_run {
         info!("dry-run mode: capture only, no virtual camera output");
-        return run_dry_run(cfg);
+        return run_dry_run(cfg, shutdown);
     }
 
     // Optionally auto-load the v4l2loopback module via pkexec FIRST,
@@ -136,8 +140,6 @@ fn main() {
         std::process::exit(1);
     }
 
-    let shutdown = Shutdown::install();
-
     // Shared switch: tray toggles it, sink loop reads it. Allows the user to
     // start/stop the virtual camera output without tearing down capture.
     let sink_switch = tray::SinkSwitch::new(true);
@@ -176,17 +178,46 @@ fn main() {
     }
     info!("shutdown requested; draining pipeline");
 
-    if let Err(e) = capture_handle.join() {
-        tracing::error!("capture thread panicked: {e:?}");
-    }
-    if let Err(e) = sink_handle.join() {
-        tracing::error!("sink thread panicked: {e:?}");
-    }
+    // Join with timeout — the capture thread may be blocked on cam.frame()
+    // and won't notice shutdown until the next frame. If it doesn't exit
+    // within a reasonable time, log a warning and continue (the OS will
+    // clean up the threads when the process exits).
+    join_with_timeout("capture", capture_handle, Duration::from_secs(3));
+    join_with_timeout("sink", sink_handle, Duration::from_secs(3));
     if let Some(h) = tray_handle {
-        let _ = h.join();
+        join_with_timeout("tray", h, Duration::from_secs(2));
     }
 
     info!("all threads stopped; descriptors released");
+}
+
+/// Join a thread with a timeout. Uses a parked watcher thread since
+/// JoinHandle has no built-in timeout. Logs a warning if the thread
+/// doesn't exit within the timeout — it will be killed when the process exits.
+fn join_with_timeout(name: &str, handle: std::thread::JoinHandle<()>, timeout: Duration) {
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::channel();
+    let watcher = std::thread::Builder::new()
+        .name(format!("{name}-watcher"))
+        .spawn(move || {
+            let _ = handle.join();
+            let _ = tx.send(());
+        })
+        .expect("failed to spawn watcher thread");
+
+    match rx.recv_timeout(timeout) {
+        Ok(()) => {} // Thread exited cleanly
+        Err(_) => {
+            tracing::warn!(
+                thread = name,
+                timeout_secs = timeout.as_secs(),
+                "{name} thread did not exit within timeout; will be killed on process exit"
+            );
+        }
+    }
+    // Watcher thread continues running in background — will exit when
+    // the watched thread finally finishes (or when the process exits).
+    drop(watcher);
 }
 
 /// Print all discovered loopback-capable output devices to stdout.
@@ -225,8 +256,7 @@ fn list_loopback_devices() {
 
 /// Run in dry-run mode: capture frames but discard them (no loopback output).
 /// Useful for testing camera access without a virtual device.
-fn run_dry_run(cfg: Arc<Config>) {
-    let shutdown = Shutdown::install();
+fn run_dry_run(cfg: Arc<Config>, shutdown: Shutdown) {
     let slot_bytes = cfg.width as usize * cfg.height as usize * 3;
     let pool = BufferPool::new(cfg.buffers, slot_bytes);
     let (tx, rx) = crossbeam_channel::bounded(cfg.buffers);
@@ -274,9 +304,8 @@ fn run_dry_run(cfg: Arc<Config>) {
     }
     info!("shutdown requested; stopping dry-run");
 
-    if let Err(e) = capture_handle.join() {
-        tracing::error!("capture thread panicked: {e:?}");
-    }
+    // Use timeout helpers — same graceful shutdown as normal mode
+    join_with_timeout("capture", capture_handle, Duration::from_secs(3));
     let total = drain_handle.join().unwrap_or(0);
     info!(total_frames = total, "dry-run complete");
 }
