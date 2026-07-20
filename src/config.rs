@@ -152,6 +152,25 @@ impl ResolvedConfig {
         }
     }
 
+    /// Clamp obviously-invalid values to safe fallbacks so a stale or partial
+    /// config can never zero out the buffer pool / frame size (which silently
+    /// drops every frame). Belt-and-suspenders on top of the settings defaults.
+    pub fn sanitized(mut self) -> Self {
+        if self.width == 0 {
+            self.width = 1280;
+        }
+        if self.height == 0 {
+            self.height = 720;
+        }
+        if self.fps == 0 {
+            self.fps = 30;
+        }
+        if self.buffers == 0 {
+            self.buffers = 4;
+        }
+        self
+    }
+
     /// Convert back to settings for saving.
     pub fn to_settings(&self) -> crate::settings::Settings {
         crate::settings::Settings {

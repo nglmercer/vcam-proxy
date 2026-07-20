@@ -78,7 +78,7 @@ fn main() {
     }
 
     // Resolve final config: CLI args override settings file.
-    let cfg = Arc::new(ResolvedConfig::from_cli_and_settings(&cli, &settings));
+    let cfg = Arc::new(ResolvedConfig::from_cli_and_settings(&cli, &settings).sanitized());
 
     if cli.list {
         capture::list_cameras();
@@ -213,13 +213,17 @@ fn main() {
     // start/stop the virtual camera output without tearing down capture.
     let sink_switch = tray::SinkSwitch::new(true);
 
+    // Shared pipeline counters — created up front so the tray can display the
+    // *same* live atomics the capture/sink threads increment.
+    let stats = Arc::new(Stats::default());
+
     // Spawn the system-tray icon for on/off toggle (unless disabled).
     let tray_handle = if cli.no_tray {
         info!("tray icon disabled via --no-tray");
         None
     } else {
         // Gracefully continues without a tray if D-Bus is unavailable.
-        let tray_stats = tray::TrayStats::new(cfg.width, cfg.height, cfg.fps);
+        let tray_stats = tray::TrayStats::new(stats.clone(), cfg.width, cfg.height, cfg.fps);
         tray::spawn(sink_switch.clone(), shutdown.clone(), tray_stats)
     };
 
@@ -232,7 +236,6 @@ fn main() {
     // dropped at the capture side, never queued unboundedly.
     let (tx, rx) = crossbeam_channel::bounded(cfg.buffers);
 
-    let stats = Arc::new(Stats::default());
     let sink_handle = pipeline::spawn_sink(
         cfg.clone(),
         loopback_path,

@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 use crate::config::FormatPref;
 
 /// Persistent settings that can be saved to and loaded from a config file.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     /// Physical camera index.
     #[serde(default)]
@@ -91,6 +91,30 @@ fn default_exclusive_caps() -> u32 {
 }
 fn default_timeout() -> u32 {
     1000
+}
+
+// NOTE: `#[serde(default = "...")]` only applies when *deserializing* a
+// (possibly partial) TOML file. It does NOT feed into `Default::default()`.
+// Deriving `Default` would therefore zero every numeric field, which in turn
+// yields a 0-slot buffer pool and a 0-byte frame size — silently dropping
+// every captured frame. We implement `Default` by hand so the no-config-file
+// path uses the same sane values as the serde defaults.
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            camera: 0,
+            device: default_device(),
+            width: default_width(),
+            height: default_height(),
+            fps: default_fps(),
+            buffers: default_buffers(),
+            format: FormatPref::default(),
+            retry_ms: default_retry_ms(),
+            multi_reader: default_multi_reader(),
+            exclusive_caps: default_exclusive_caps(),
+            timeout: default_timeout(),
+        }
+    }
 }
 
 impl Settings {

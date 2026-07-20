@@ -8,7 +8,7 @@
 //! Gracefully degrades: if no D-Bus session is available the thread logs and
 //! exits without taking the pipeline down with it.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -17,6 +17,7 @@ use ksni::menu::*;
 use ksni::Tray;
 use tracing::{info, warn};
 
+use crate::pipeline::Stats;
 use crate::shutdown::Shutdown;
 
 /// Shared flag the sink loop reads and the tray flips.
@@ -42,37 +43,33 @@ impl SinkSwitch {
     }
 }
 
-/// Pipeline statistics snapshot for tray display.
-#[derive(Debug, Clone, Default)]
+/// Pipeline statistics view for tray display.
+///
+/// Wraps the *same* `Arc<Stats>` the capture/sink threads increment, so the
+/// tray always reflects live counters instead of a disconnected copy.
+#[derive(Clone)]
 pub struct TrayStats {
-    pub captured: Arc<AtomicU64>,
-    pub written: Arc<AtomicU64>,
-    pub dropped: Arc<AtomicU64>,
+    stats: Arc<Stats>,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    #[allow(dead_code)] // reserved for future use
-    pub camera_name: String,
 }
 
 impl TrayStats {
-    pub fn new(width: u32, height: u32, fps: u32) -> Self {
+    pub fn new(stats: Arc<Stats>, width: u32, height: u32, fps: u32) -> Self {
         Self {
-            captured: Arc::new(AtomicU64::new(0)),
-            written: Arc::new(AtomicU64::new(0)),
-            dropped: Arc::new(AtomicU64::new(0)),
+            stats,
             width,
             height,
             fps,
-            camera_name: String::new(),
         }
     }
 
     pub fn snapshot(&self) -> (u64, u64, u64) {
         (
-            self.captured.load(Ordering::Relaxed),
-            self.written.load(Ordering::Relaxed),
-            self.dropped.load(Ordering::Relaxed),
+            self.stats.captured.load(Ordering::Relaxed),
+            self.stats.written.load(Ordering::Relaxed),
+            self.stats.dropped.load(Ordering::Relaxed),
         )
     }
 }
