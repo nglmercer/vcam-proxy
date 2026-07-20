@@ -105,5 +105,3 @@ impl ScaleContext {
         true
     }
 }
-
-

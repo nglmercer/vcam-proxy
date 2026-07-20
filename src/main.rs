@@ -102,8 +102,7 @@ fn main() {
     let gui_enabled = !cli.no_gui;
 
     // Resolve the initial config: CLI args override settings file.
-    let initial_cfg =
-        Arc::new(ResolvedConfig::from_cli_and_settings(&cli, &settings).sanitized());
+    let initial_cfg = Arc::new(ResolvedConfig::from_cli_and_settings(&cli, &settings).sanitized());
 
     // Shared live switch: GUI and tray both drive it; the sink reads it.
     let sink_switch = tray::SinkSwitch::new(true);
@@ -146,7 +145,14 @@ fn main() {
         std::thread::Builder::new()
             .name("controller".into())
             .spawn(move || {
-                run_controller(&cli, initial_cfg, gui_state, gui_wake, sink_switch, shutdown)
+                run_controller(
+                    &cli,
+                    initial_cfg,
+                    gui_state,
+                    gui_wake,
+                    sink_switch,
+                    shutdown,
+                )
             })
             .expect("failed to spawn controller thread")
     };
@@ -314,7 +320,10 @@ fn run_controller(
                             eprintln!("✓ Multi-reader mode ready: 2 virtual cameras available");
                             info!("multi-reader module reload successful, 2 devices available");
                         } else {
-                            warn!("module reloaded but only {} devices found after waiting", sink::count_loopback_devices());
+                            warn!(
+                                "module reloaded but only {} devices found after waiting",
+                                sink::count_loopback_devices()
+                            );
                             eprintln!(
                                 "WARNING: Module reloaded but only {} device(s) found.\n\
                                  The second device should appear shortly. If not, try:\n\
@@ -341,7 +350,9 @@ fn run_controller(
                              Or run vcam-proxy with:\n\
                                vcam-proxy --auto-load-module"
                         );
-                        eprintln!("\nContinuing with single-device mode (only one app at a time)...");
+                        eprintln!(
+                            "\nContinuing with single-device mode (only one app at a time)..."
+                        );
                     }
                 }
             }
@@ -404,11 +415,20 @@ fn run_controller(
             info!("tray icon disabled via --no-tray");
             None
         } else {
-            let tray_stats =
-                tray::TrayStats::new(stats.clone(), current_cfg.width, current_cfg.height, current_cfg.fps);
+            let tray_stats = tray::TrayStats::new(
+                stats.clone(),
+                current_cfg.width,
+                current_cfg.height,
+                current_cfg.fps,
+            );
             // The tray's "Settings…" item opens the GUI window.
             let gui_wake_for_tray = gui_wake.clone();
-            tray::spawn_with_settings(sink_switch.clone(), shutdown.clone(), tray_stats, gui_wake_for_tray)
+            tray::spawn_with_settings(
+                sink_switch.clone(),
+                shutdown.clone(),
+                tray_stats,
+                gui_wake_for_tray,
+            )
         };
 
         let slot_bytes = current_cfg.width as usize * current_cfg.height as usize * 3;
@@ -422,8 +442,14 @@ fn run_controller(
                 .map(|d| d.path)
                 .collect();
             if loopback_paths.len() >= 2 {
-                info!(devices = loopback_paths.len(), "multi-reader sink: feeding all loopback devices");
-                eprintln!("✓ Multi-reader mode active: writing to {} virtual cameras", loopback_paths.len());
+                info!(
+                    devices = loopback_paths.len(),
+                    "multi-reader sink: feeding all loopback devices"
+                );
+                eprintln!(
+                    "✓ Multi-reader mode active: writing to {} virtual cameras",
+                    loopback_paths.len()
+                );
                 eprintln!("  App 1 can open: {}", loopback_paths[0].display());
                 eprintln!("  App 2 can open: {}", loopback_paths[1].display());
                 sink::build_multi_with_paths(loopback_paths)
@@ -583,8 +609,7 @@ fn list_loopback_devices() {
             }
             println!("Video output devices ({} found):", devices.len());
             for dev in &devices {
-                let is_loopback =
-                    dev.driver == "v4l2loopback" || dev.driver == "v4l2 loopback";
+                let is_loopback = dev.driver == "v4l2loopback" || dev.driver == "v4l2 loopback";
                 println!(
                     "  {} {}{}",
                     dev.path.display(),

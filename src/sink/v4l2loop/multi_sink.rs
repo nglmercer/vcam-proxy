@@ -40,7 +40,11 @@ impl super::super::Sink for V4l2LoopMultiSink {
     }
 
     fn describe(&self) -> String {
-        let paths: Vec<_> = self.sinks.iter().map(|s| s.path.display().to_string()).collect();
+        let paths: Vec<_> = self
+            .sinks
+            .iter()
+            .map(|s| s.path.display().to_string())
+            .collect();
         format!("v4l2loopback:multi({})", paths.join(", "))
     }
 }

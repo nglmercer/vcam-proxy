@@ -109,10 +109,12 @@ pub fn rgb24_to_nv12(src: &[u8], dst: &mut [u8], width: u32, height: u32) -> boo
             let (r11, g11, b11) = (src[s11] as i32, src[s11 + 1] as i32, src[s11 + 2] as i32);
 
             // BT.601: Y = 16 + (66R + 129G + 25B) / 256
-            y_plane[y_row0 + bx] = (16 + ((66 * r00 + 129 * g00 + 25 * b00 + 128) >> 8)).clamp(0, 255) as u8;
+            y_plane[y_row0 + bx] =
+                (16 + ((66 * r00 + 129 * g00 + 25 * b00 + 128) >> 8)).clamp(0, 255) as u8;
             y_plane[y_row0 + bx + 1] =
                 (16 + ((66 * r01 + 129 * g01 + 25 * b01 + 128) >> 8)).clamp(0, 255) as u8;
-            y_plane[y_row1 + bx] = (16 + ((66 * r10 + 129 * g10 + 25 * b10 + 128) >> 8)).clamp(0, 255) as u8;
+            y_plane[y_row1 + bx] =
+                (16 + ((66 * r10 + 129 * g10 + 25 * b10 + 128) >> 8)).clamp(0, 255) as u8;
             y_plane[y_row1 + bx + 1] =
                 (16 + ((66 * r11 + 129 * g11 + 25 * b11 + 128) >> 8)).clamp(0, 255) as u8;
 

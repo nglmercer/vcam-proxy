@@ -54,7 +54,12 @@ impl super::super::Sink for V4l2LoopSink {
         let (needs_scaling, neg_w, neg_h, neg_fmt) = {
             let active = self.active.as_ref().expect("active checked above");
             let (neg_w, neg_h, neg_fmt) = active.negotiated;
-            (neg_fmt != frame.format || neg_w != frame.width || neg_h != frame.height, neg_w, neg_h, neg_fmt)
+            (
+                neg_fmt != frame.format || neg_w != frame.width || neg_h != frame.height,
+                neg_w,
+                neg_h,
+                neg_fmt,
+            )
         };
 
         if needs_scaling {

@@ -76,10 +76,7 @@ impl GuiWake {
 
 /// Run the egui application on the current thread (the main thread). Blocks until
 /// the window is allowed to close — i.e. on GUI "Quit" or process shutdown.
-pub fn run(
-    state: Arc<Mutex<GuiState>>,
-    shutdown: Shutdown,
-) {
+pub fn run(state: Arc<Mutex<GuiState>>, shutdown: Shutdown) {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("vcam-proxy — Settings")
@@ -98,6 +95,10 @@ pub fn run(
 struct App {
     state: Arc<Mutex<GuiState>>,
     shutdown: Shutdown,
+    /// Whether the window is currently shown. We drive this explicitly so we
+    /// don't toggle visibility every frame (which made the window flash to
+    /// black right after opening).
+    visible: bool,
     // Local UI scratch values (so we can validate before committing).
     camera_text: String,
     device_text: String,
@@ -115,6 +116,7 @@ impl App {
     fn new(state: Arc<Mutex<GuiState>>, shutdown: Shutdown) -> Self {
         let s = state.lock().unwrap();
         let cfg = &s.desired;
+        let open_immediately = s.open_window;
         let camera_text = cfg.camera.to_string();
         let device_text = cfg.device.clone();
         let width_text = cfg.width.to_string();
@@ -128,6 +130,7 @@ impl App {
         Self {
             state,
             shutdown,
+            visible: open_immediately,
             camera_text,
             device_text,
             width_text,
@@ -185,7 +188,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let close_requested = ctx.input(|i| i.viewport().close_requested());
 
-        // Decide visibility: show only when open_window is set.
+        // Open request (tray "Settings…" / first run / --settings): show.
         let want_open = {
             let mut g = self.state.lock().unwrap();
             if g.open_window {
@@ -196,10 +199,8 @@ impl eframe::App for App {
                 false
             }
         };
-
         if want_open {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.visible = true;
         }
 
         // Closing the window (vs. an explicit Quit) just hides it — the app
@@ -215,18 +216,19 @@ impl eframe::App for App {
                 return; // let eframe close → run_native returns
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.visible = false;
+        }
+
+        // Hidden: stay hidden, poll periodically for the open request.
+        // Do NOT block the main/event-loop thread.
+        if !self.visible {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             ctx.request_repaint_after(Duration::from_millis(200));
             return;
         }
 
-        // Hidden + not asked to open: stay hidden, poll periodically for the
-        // open request (do NOT block the main/event-loop thread).
-        if !want_open {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            ctx.request_repaint_after(Duration::from_millis(200));
-            return;
-        }
+        // Visible: actually show and draw the UI.
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
 
         // Visible: edit a local copy so we don't fight the borrow checker, then
         // write changes back to the shared state after the frame.
@@ -370,16 +372,19 @@ impl eframe::App for App {
                             let _ = desired.clone().to_settings().save();
                             restart = true;
                             self.status.clear();
+                            self.visible = false;
                             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                         }
                         Err(e) => self.status = e,
                     }
                 }
                 if ui.button("Hide").clicked() {
+                    self.visible = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
                 if ui.button("Quit").clicked() {
                     quit = true;
+                    self.visible = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
             });

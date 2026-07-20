@@ -21,9 +21,8 @@ pub struct DeviceInfo {
 /// Devices without a matching `/dev/video*` node are skipped.
 pub fn discover_loopback_devices() -> Result<Vec<DeviceInfo>, LoopbackError> {
     let sysfs_path = Path::new("/sys/class/video4linux");
-    let contents = fs::read_dir(sysfs_path).map_err(|source| LoopbackError::ScanFailed {
-        source,
-    })?;
+    let contents =
+        fs::read_dir(sysfs_path).map_err(|source| LoopbackError::ScanFailed { source })?;
 
     let mut devices = Vec::new();
     for entry in contents {

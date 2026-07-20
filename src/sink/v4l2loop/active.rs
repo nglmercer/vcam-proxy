@@ -32,7 +32,12 @@ pub(crate) struct Active {
 }
 
 impl Active {
-    pub(crate) fn open(path: &PathBuf, width: u32, height: u32, fmt: PixelFormat) -> io::Result<Self> {
+    pub(crate) fn open(
+        path: &PathBuf,
+        width: u32,
+        height: u32,
+        fmt: PixelFormat,
+    ) -> io::Result<Self> {
         let dev = Device::with_path(path)?;
 
         if let Ok(caps) = dev.query_caps() {
@@ -129,7 +134,11 @@ fn disable_keep_format(dev: &Device) {
 fn apply_loopback_controls(dev: &Device) {
     for (id, name, value) in [
         (CID_KEEP_FORMAT, "keep_format", CtrlValue::Boolean(true)),
-        (CID_SUSTAIN_FRAMERATE, "sustain_framerate", CtrlValue::Boolean(true)),
+        (
+            CID_SUSTAIN_FRAMERATE,
+            "sustain_framerate",
+            CtrlValue::Boolean(true),
+        ),
         (CID_TIMEOUT, "timeout", CtrlValue::Integer(3000)),
     ] {
         match dev.set_control(Control { id, value }) {
@@ -138,5 +147,3 @@ fn apply_loopback_controls(dev: &Device) {
         }
     }
 }
-
-

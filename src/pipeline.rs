@@ -34,17 +34,7 @@ pub fn spawn_sink(
 ) -> JoinHandle<()> {
     thread::Builder::new()
         .name("sink".into())
-        .spawn(move || {
-            run(
-                &cfg,
-                sink_impl,
-                &rx,
-                &pool,
-                &shutdown,
-                &stats,
-                &sink_switch,
-            )
-        })
+        .spawn(move || run(&cfg, sink_impl, &rx, &pool, &shutdown, &stats, &sink_switch))
         .expect("failed to spawn sink thread")
 }
 

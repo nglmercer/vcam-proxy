@@ -34,7 +34,9 @@ pub enum ModuleError {
     LoadFailed { reason: String },
     #[error("pkexec not available; run manually: sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1")]
     PkexecNotAvailable,
-    #[error("cannot auto-install: unsupported Linux distribution. Install v4l2loopback-dkms manually")]
+    #[error(
+        "cannot auto-install: unsupported Linux distribution. Install v4l2loopback-dkms manually"
+    )]
     DistroNotSupported,
     #[error("package install failed (exit code {0}); check network and try installing v4l2loopback-dkms manually")]
     InstallFailed(i32),

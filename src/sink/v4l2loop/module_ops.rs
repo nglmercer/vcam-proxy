@@ -101,7 +101,8 @@ fn load_module_with_params_internal(params: &str, force_reload: bool) -> Result<
                 Ok(())
             } else {
                 Err(ModuleError::LoadFailed {
-                    reason: "modprobe reported success but module not visible in /proc/modules".into(),
+                    reason: "modprobe reported success but module not visible in /proc/modules"
+                        .into(),
                 })
             }
         }
