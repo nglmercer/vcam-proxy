@@ -87,7 +87,9 @@ mod tests {
         // 100% red, BT.601: Y=81, U=90, V=240 (two pixels).
         let src = [81, 90, 81, 240, 81, 90, 81, 240];
         // Note: YUY2 byte order is Y0 U Y1 V.
-        let src = [src[0], src[1], src[2], src[3], src[4], src[5], src[6], src[7]];
+        let src = [
+            src[0], src[1], src[2], src[3], src[4], src[5], src[6], src[7],
+        ];
         let mut dst = [0u8; 12];
         assert!(yuy2_to_rgb24(&src, &mut dst, 2, 2));
         for px in dst.chunks_exact(3) {

@@ -18,6 +18,15 @@ pub mod v4l2loop;
 #[cfg(target_os = "windows")]
 pub mod winpipe;
 
+// Re-export the Linux discovery utilities for use from main.
+#[cfg(target_os = "linux")]
+pub use v4l2loop::{
+    check_device_access, discover_loopback_devices, find_loopback_device, is_module_loaded,
+    load_module,
+};
+#[cfg(target_os = "linux")]
+pub use v4l2loop::{AccessError, LoopbackError, ModuleError};
+
 pub trait Sink: Send {
     /// Write one frame. `WouldBlock` signals "no consumer attached / reader
     /// behind" and is counted as a graceful drop by the caller; any other

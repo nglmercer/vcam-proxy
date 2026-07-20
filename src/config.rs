@@ -54,6 +54,22 @@ pub struct Config {
     /// Backoff between camera re-open attempts after a failure, ms.
     #[arg(long, default_value_t = 1000)]
     pub retry_ms: u64,
+
+    /// List available v4l2loopback output devices and exit.
+    #[arg(long)]
+    pub list_loopback: bool,
+
+    /// Test capture without writing to the loopback device (dry run).
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Disable the system-tray icon.
+    #[arg(long)]
+    pub no_tray: bool,
+
+    /// Auto-load the v4l2loopback kernel module via pkexec if not present.
+    #[arg(long)]
+    pub auto_load_module: bool,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

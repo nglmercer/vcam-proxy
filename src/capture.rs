@@ -119,8 +119,7 @@ fn open_camera(cfg: &Config) -> Result<Camera, NokhwaError> {
     // everything else prefers the first entry of its accept list.
     let preferred = accept[0];
     let wanted = CameraFormat::new(res, preferred, cfg.fps);
-    let request =
-        RequestedFormat::with_formats(RequestedFormatType::Closest(wanted), accept);
+    let request = RequestedFormat::with_formats(RequestedFormatType::Closest(wanted), accept);
 
     let mut cam = Camera::new(CameraIndex::Index(cfg.camera), request)?;
     cam.open_stream()?;

@@ -34,15 +34,13 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
     ERROR_PIPE_NOT_CONNECTED, HANDLE, WAIT_OBJECT_0, WIN32_ERROR,
 };
-use windows::Win32::Storage::FileSystem::{
-    WriteFile, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_OUTBOUND,
-};
-use windows::Win32::System::IO::{CancelIo, GetOverlappedResult, OVERLAPPED};
+use windows::Win32::Storage::FileSystem::{WriteFile, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_OUTBOUND};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_TYPE_BYTE,
     PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
+use windows::Win32::System::IO::{CancelIo, GetOverlappedResult, OVERLAPPED};
 
 use crate::frame::Frame;
 
@@ -149,8 +147,7 @@ impl Conn {
                         ));
                     }
                     let mut written = 0u32;
-                    GetOverlappedResult(self.pipe, &self.ov, &mut written, false)
-                        .map_err(to_io)?;
+                    GetOverlappedResult(self.pipe, &self.ov, &mut written, false).map_err(to_io)?;
                     Ok(())
                 }
                 Err(e) => Err(to_io(e)),
