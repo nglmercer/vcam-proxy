@@ -108,7 +108,14 @@ pub fn run(
         }
 
         let stats = Arc::new(Stats::default());
-        let tray_handle = spawn_tray(cli, &current_cfg, &stats, &sink_switch, &shutdown, &gui_wake);
+        let tray_handle = spawn_tray(
+            cli,
+            &current_cfg,
+            &stats,
+            &sink_switch,
+            &shutdown,
+            &gui_wake,
+        );
 
         let slot_bytes = current_cfg.width as usize * current_cfg.height as usize * 3;
         let pool = BufferPool::new(current_cfg.buffers, slot_bytes);
@@ -180,7 +187,8 @@ fn ensure_module(cfg: &ResolvedConfig, module_params: &str) {
                         "v4l2loopback max_openers is {}, which blocks multiple apps from \
                          reading the virtual camera at once. Reload the module:\n  \
                          sudo modprobe -r v4l2loopback\n  sudo modprobe v4l2loopback {}",
-                        max, module_params,
+                        max,
+                        module_params,
                     );
                 } else {
                     info!(max_openers = max, "max_openers sufficient for multi-reader");
@@ -189,7 +197,7 @@ fn ensure_module(cfg: &ResolvedConfig, module_params: &str) {
         }
     }
 
-    if !(cfg.auto_load_module && !sink::is_module_loaded()) {
+    if !cfg.auto_load_module || !sink::is_module_loaded() {
         return;
     }
 

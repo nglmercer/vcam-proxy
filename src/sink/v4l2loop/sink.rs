@@ -78,8 +78,7 @@ impl V4l2LoopSink {
             // is draining buffers, or a poll timed out. This is the designed
             // escape hatch — NOT a real error. Don't count, don't reopen.
             Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock
-                    || e.kind() == io::ErrorKind::TimedOut =>
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
             {
                 Err(e)
             }

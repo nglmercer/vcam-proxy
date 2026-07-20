@@ -61,7 +61,9 @@ pub fn warn_exclusive_caps_zero(module_params: &str) {
 }
 
 pub fn note_pkexec_missing(module_params: &str) {
-    eprintln!("Note: pkexec not available. Run manually:\n  sudo modprobe v4l2loopback {module_params}");
+    eprintln!(
+        "Note: pkexec not available. Run manually:\n  sudo modprobe v4l2loopback {module_params}"
+    );
 }
 
 pub fn note_distro_unsupported(module_params: &str) {

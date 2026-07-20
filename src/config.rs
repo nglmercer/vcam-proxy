@@ -61,7 +61,6 @@ pub struct Config {
     pub image: Option<String>,
 
     // ---- Optional overrides (prefer config.toml) ----
-
     /// Override: camera index.
     #[arg(short, long)]
     pub camera: Option<u32>,

@@ -195,13 +195,25 @@ pub fn print_settings_table(cfg: &ResolvedConfig, settings: &Settings) {
     println!("Current settings (source: [C]LI / [F]ile / [D]efault):");
     println!("{sep}");
 
-    row("camera", &cfg.camera, source_num(cfg.camera, settings.camera, 0));
+    row(
+        "camera",
+        &cfg.camera,
+        source_num(cfg.camera, settings.camera, 0),
+    );
     row(
         "device",
         &cfg.device,
-        if cfg.device != settings.device { 'C' } else { 'D' },
+        if cfg.device != settings.device {
+            'C'
+        } else {
+            'D'
+        },
     );
-    row("width", &cfg.width, source_num(cfg.width, settings.width, 1280));
+    row(
+        "width",
+        &cfg.width,
+        source_num(cfg.width, settings.width, 1280),
+    );
     row(
         "height",
         &cfg.height,
