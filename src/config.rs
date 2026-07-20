@@ -7,7 +7,7 @@
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(
     name = "vcam-proxy",
     version,
@@ -71,6 +71,16 @@ pub struct Config {
     /// Disable the system-tray icon.
     #[arg(long)]
     pub no_tray: bool,
+
+    /// Run headless without the settings GUI (args/config file only).
+    /// By default vcam-proxy opens a settings window on first run and keeps a
+    /// tray icon afterwards; pass this to skip all of that.
+    #[arg(long)]
+    pub no_gui: bool,
+
+    /// Force the settings window to open on startup (overrides first-run logic).
+    #[arg(long)]
+    pub settings: bool,
 
     /// Auto-load the v4l2loopback kernel module via pkexec if not present.
     #[arg(long)]

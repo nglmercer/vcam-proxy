@@ -26,6 +26,10 @@ toml = "0.8"
 dirs = "5"
 # Open files/URLs with the system's default handler.
 open = "5"
+# egui: pure-Rust immediate-mode GUI (no GTK/Qt/C deps) used for the
+# in-app settings window. eframe provides the native windowing backend.
+egui = "0.29"
+eframe = "0.29"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # nokhwa: cross-platform capture abstraction; input-v4l = native V4L2 backend,

@@ -6,8 +6,9 @@ Captures from a real webcam and streams the frames to a `v4l2loopback` virtual d
 
 ## Features
 
+- **Settings GUI (egui)**: A full in-app window to configure every option — no need to touch CLI flags. Opens automatically on first run for guided setup, then stays hidden (tray only) and is reachable from the tray "Settings…" menu.
 - **Zero-copy pipeline**: Frames go camera → kernel-mapped buffer → virtual device (one memcpy per frame)
-- **Tray icon**: Right-click to see the status (captured/written/dropped, resolution, fps), toggle the virtual camera on/off, or open the config file (uses D-Bus, no GTK)
+- **Tray icon**: Right-click to see the status (captured/written/dropped, resolution, fps), toggle the virtual camera on/off, open the settings window, or open the config file (uses D-Bus, no GTK)
 - **Persistent settings**: Save your preferred camera, resolution, fps, and device settings to `~/.config/vcam-proxy/config.toml`
 - **Multi-reader mode**: Configure v4l2loopback to allow multiple apps to use the virtual camera simultaneously
 - **Auto-detect**: Scans `/dev/video*` for loopback devices, falls back gracefully
@@ -119,6 +120,37 @@ cargo run --release -- --camera 1 --width 1280 --height 720 --fps 30
 
 ---
 
+## Settings GUI
+
+vcam-proxy's primary configuration surface is an in-app window (built with
+[egui](https://github.com/emilk/egui) — pure Rust, no GTK/Qt). It exposes
+**every** option: camera index, device node, sink backend, resolution,
+frame rate, wire format, buffers, retry interval, multi-reader mode,
+`exclusive_caps`, and timeout.
+
+### First run vs. afterwards
+
+- **First run** (no `~/.config/vcam-proxy/config.toml` yet): the window opens
+  automatically as a guided setup. Change the device / camera, click
+  **Apply & Restart**, and the proxy starts streaming.
+- **Later runs**: the window opens **hidden** — the app runs in the background
+  with only the tray icon. Open it any time from the tray's **Settings…** menu
+  item, or pass `--settings` to force it open on launch.
+
+### Window controls
+
+- **Virtual camera: ON / OFF** — toggles output *live* (no restart).
+- **Save to config** — persists the current values to `config.toml`.
+- **Apply & Restart** — saves, then re-creates the capture→sink pipeline
+  with the new settings (needed for camera / resolution / format changes).
+- **Hide** — closes the window but keeps vcam-proxy running (tray only).
+- **Quit** — stops the application.
+
+CLI flags still work and take precedence over saved settings. To run fully
+headless (no GUI, no tray — args/config file only), use `--no-gui`.
+
+---
+
 ## CLI Reference
 
 | Flag | Default | Description |
@@ -135,6 +167,8 @@ cargo run --release -- --camera 1 --width 1280 --height 720 --fps 30
 | `--sink` | `auto` | Sink backend: `auto`, `v4l2`, `null` |
 | `--dry-run` | false | Test capture without writing to virtual device |
 | `--no-tray` | false | Disable system tray icon |
+| `--no-gui` | false | Run headless: no settings window (args/config only) |
+| `--settings` | false | Force the settings window open on startup |
 | `--auto-load-module` | false | Auto-install (if needed) and load v4l2loopback via pkexec |
 | `--retry-ms` | 1000 | Backoff between camera re-open attempts |
 | `--multi.Reader` | true | Enable multi-reader virtual camera mode |

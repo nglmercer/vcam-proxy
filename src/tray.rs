@@ -19,6 +19,7 @@ use tracing::{info, warn};
 
 use crate::pipeline::Stats;
 use crate::shutdown::Shutdown;
+use crate::ui::GuiWake;
 
 /// Shared flag the sink loop reads and the tray flips.
 #[derive(Clone)]
@@ -40,6 +41,11 @@ impl SinkSwitch {
     pub fn toggle(&self) -> bool {
         let prev = self.inner.fetch_xor(true, Ordering::Relaxed);
         !prev
+    }
+
+    /// Set the switch to a specific state (used by the GUI's live on/off).
+    pub fn set(&self, on: bool) {
+        self.inner.store(on, Ordering::Relaxed);
     }
 }
 
@@ -80,6 +86,7 @@ struct VcamTray {
     shutdown: Shutdown,
     stats: TrayStats,
     config_path: String,
+    gui_wake: Option<Arc<GuiWake>>,
 }
 
 impl Tray for VcamTray {
@@ -169,6 +176,19 @@ impl Tray for VcamTray {
             }
             .into(),
             MenuItem::Separator,
+            // In-app settings window (the primary configuration surface).
+            StandardItem {
+                label: "Settings…".into(),
+                icon_name: "preferences-system".into(),
+                activate: Box::new(|tray: &mut Self| {
+                    if let Some(wake) = &tray.gui_wake {
+                        info!("opening settings window from tray");
+                        wake.open();
+                    }
+                }),
+                ..Default::default()
+            }
+            .into(),
             // Config file shortcut
             StandardItem {
                 label: "Open Config File".into(),
@@ -198,10 +218,14 @@ impl Tray for VcamTray {
 
 /// Spawn the tray on its own thread using ksni blocking API.
 /// Never panics into a pipeline thread — all errors are logged.
-pub fn spawn(
+///
+/// When `gui_wake` is provided, a "Settings…" menu item pops the in-app GUI
+/// window open. Pass `None` to omit it (headless / `--no-gui` mode).
+pub fn spawn_with_settings(
     sink_switch: SinkSwitch,
     shutdown: Shutdown,
     stats: TrayStats,
+    gui_wake: Option<Arc<GuiWake>>,
 ) -> Option<thread::JoinHandle<()>> {
     let config_path = crate::settings::Settings::config_path()
         .display()
@@ -213,6 +237,7 @@ pub fn spawn(
             shutdown,
             stats,
             config_path,
+            gui_wake,
         };
         match tray.spawn() {
             Ok(_handle) => {
