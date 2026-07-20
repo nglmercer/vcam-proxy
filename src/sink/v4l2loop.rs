@@ -502,6 +502,53 @@ pub enum ModuleError {
 // Active sink (internal streaming state)
 // ---------------------------------------------------------------------------
 
+/// Convert a V4L2 FourCC byte array to our PixelFormat.
+/// Returns None for formats we don't support.
+fn fourcc_to_pixel_format(fourcc: &[u8; 4]) -> Option<PixelFormat> {
+    match fourcc {
+        b"YUYV" => Some(PixelFormat::Yuy2),
+        b"RGB3" => Some(PixelFormat::Rgb24),
+        b"NV12" => Some(PixelFormat::Nv12),
+        b"MJPG" => Some(PixelFormat::Mjpeg),
+        _ => None,
+    }
+}
+
+/// Scale an NV12 frame from (src_w, src_h) to (dst_w, dst_h) using nearest-neighbor.
+/// Returns None if buffer sizes are insufficient.
+fn scale_nv12(src: &[u8], dst: &mut [u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> bool {
+    let (sw, sh, dw, dh) = (src_w as usize, src_h as usize, dst_w as usize, dst_h as usize);
+    let src_y_size = sw * sh;
+    let dst_y_size = dw * dh;
+    if src.len() < src_y_size * 3 / 2 || dst.len() < dst_y_size * 3 / 2 {
+        return false;
+    }
+
+    let (src_y, src_uv) = src.split_at(src_y_size);
+    let (dst_y, dst_uv) = dst.split_at_mut(dst_y_size);
+
+    // Scale Y plane (luma) - nearest neighbor
+    for y in 0..dh {
+        let src_y_idx = (y * sh / dh) * sw;
+        for x in 0..dw {
+            let src_x = x * sw / dw;
+            dst_y[y * dw + x] = src_y[src_y_idx + src_x];
+        }
+    }
+
+    // Scale UV plane (chroma) - NV12 has interleaved UV at half resolution
+    let (src_uv_h, dst_uv_h) = (sh / 2, dh / 2);
+    let (src_uv_stride, dst_uv_stride) = (sw, dw);
+    for y in 0..dst_uv_h {
+        let src_y_idx = (y * src_uv_h / dst_uv_h) * src_uv_stride;
+        for x in 0..dst_uv_stride {
+            let src_x = x * src_uv_stride / dst_uv_stride;
+            dst_uv[y * dst_uv_stride + x] = src_uv[src_y_idx + src_x];
+        }
+    }
+    true
+}
+
 struct Active {
     stream: MmapStream<'static>,
     #[allow(dead_code)] // kept alive: owns the device fd backing `stream`
@@ -530,14 +577,18 @@ impl Active {
 
         let want = Format::new(width, height, FourCC::new(&fmt.fourcc()));
         let actual = Output::set_format(&dev, &want)?;
+        // Accept whatever the driver selects - v4l2loopback may adjust resolution
+        // to match its internal state. We'll scale frames if needed.
         if actual.width != width || actual.height != height || actual.fourcc != want.fourcc {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "loopback rejected format {}x{} {:?}: driver selected {}x{} {}",
-                    width, height, fmt, actual.width, actual.height, actual.fourcc
-                ),
-            ));
+            warn!(
+                requested_w = width,
+                requested_h = height,
+                requested_fmt = ?fmt,
+                actual_w = actual.width,
+                actual_h = actual.height,
+                actual_fmt = %actual.fourcc,
+                "loopback adjusted format; frames will be scaled to match"
+            );
         }
         info!(
             width = actual.width,
@@ -550,10 +601,14 @@ impl Active {
         let mut stream = MmapStream::with_buffers(&dev, Type::VideoOutput, NUM_KBUF)?;
         stream.set_timeout(Duration::from_millis(POLL_TIMEOUT_MS));
 
+        // Store the actual format the driver selected (may differ from requested)
+        let actual_fmt = fourcc_to_pixel_format(&actual.fourcc.repr).unwrap_or(fmt);
+        let negotiated = (actual.width, actual.height, actual_fmt);
+
         Ok(Active {
             stream,
             dev,
-            negotiated: (width, height, fmt),
+            negotiated,
         })
     }
 
@@ -647,11 +702,11 @@ impl super::Sink for V4l2LoopSink {
     fn write(&mut self, frame: &Frame) -> io::Result<()> {
         let want = (frame.width, frame.height, frame.format);
 
-        // (Re)open on first frame or whenever the format changes; a format
-        // change requires a fresh negotiation + STREAMOFF/STREAMON cycle.
+        // (Re)open on first frame or whenever the pixel format changes.
+        // Resolution differences are handled by scaling, not reopening.
         let reopen = match &self.active {
             None => true,
-            Some(a) => a.negotiated != want,
+            Some(a) => a.negotiated.2 != want.2,
         };
         if reopen {
             info!(
@@ -662,14 +717,44 @@ impl super::Sink for V4l2LoopSink {
             self.active = Some(Active::open(&self.path, want.0, want.1, want.2)?);
         }
 
-        let active = self.active.as_mut().expect("active checked above");
-        match active.write(frame.payload()) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(e),
-            Err(e) => {
-                // Drop the device so the next frame triggers a clean re-open.
-                self.active = None;
-                Err(e)
+        // Check if we need to scale (driver selected different resolution than input)
+        let (needs_scaling, neg_w, neg_h, neg_fmt) = {
+            let active = self.active.as_mut().expect("active checked above");
+            let (nw, nh, nf) = active.negotiated;
+            (nw != frame.width || nh != frame.height, nw, nh, nf)
+        };
+
+        if needs_scaling && frame.format == PixelFormat::Nv12 && neg_fmt == PixelFormat::Nv12 {
+            // Scale NV12 frame to match driver's selected resolution
+            let expected_size = neg_fmt.packed_size(neg_w, neg_h).unwrap_or(0);
+            let mut scaled = Vec::with_capacity(expected_size);
+            scaled.resize(expected_size, 0);
+            if scale_nv12(frame.payload(), &mut scaled, frame.width, frame.height, neg_w, neg_h) {
+                let active = self.active.as_mut().expect("active checked above");
+                match active.write(&scaled) {
+                    Ok(()) => Ok(()),
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(e),
+                    Err(e) => {
+                        self.active = None;
+                        Err(e)
+                    }
+                }
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "failed to scale frame to driver resolution",
+                ))
+            }
+        } else {
+            let active = self.active.as_mut().expect("active checked above");
+            match active.write(frame.payload()) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(e),
+                Err(e) => {
+                    // Drop the device so the next frame triggers a clean re-open.
+                    self.active = None;
+                    Err(e)
+                }
             }
         }
     }
