@@ -80,6 +80,7 @@ impl Active {
         width: u32,
         height: u32,
         fmt: PixelFormat,
+        timeout_ms: i64,
     ) -> io::Result<Self> {
         let dev = Device::with_path(path)?;
 
@@ -146,9 +147,8 @@ impl Active {
 
         // Re-enable keep_format + sustain_framerate so the virtual camera keeps advertising
         // a fixed format to CAPTURE clients (Chrome, Firefox, Zoom) between attaches.
-        // timeout=0 means "never expire the last frame" — readers can reopen the
-        // device without seeing a green timeout flash between producer frames.
-        apply_loopback_controls(&dev, cids, 0);
+        // timeout from caller: 0 = keep last frame forever (no green timeout flash).
+        apply_loopback_controls(&dev, cids, timeout_ms);
 
         let stream = MmapStream::with_buffers(&dev, Type::VideoOutput, NUM_KBUF)?;
 
@@ -176,9 +176,10 @@ impl Active {
             }
         }
 
-        let (buf, meta) = self.stream.next().map_err(|e| {
-            io::Error::other(format!("failed to get output buffer: {e}"))
-        })?;
+        let (buf, meta) = self
+            .stream
+            .next()
+            .map_err(|e| io::Error::other(format!("failed to get output buffer: {e}")))?;
 
         // Never overrun the kernel-mapped buffer (e.g. if the driver handed
         // back a smaller sizeimage than the frame needs) — error out instead

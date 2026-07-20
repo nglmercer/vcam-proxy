@@ -1,18 +1,8 @@
 //! vcam-proxy: physical camera -> virtual loopback proxy.
 //!
-//! Thread topology:
-//! - `main`    : setup, signal handling, GUI/tray, join & teardown
-//! - `capture` : owns the camera, fills pooled frames, drops when behind
-//! - `sink`    : owns the virtual device, writes frames, recycles buffers
-//!
-//! Frames flow capture -> sink through a bounded channel; free buffer slots
-//! flow back through the pool. No allocation happens per frame in steady
-//! state.
-//!
-//! Configuration is primarily done through an in-app settings window (egui).
-//! It opens automatically on first run (no config file) for guided setup, and
-//! is reachable afterwards from the tray icon. CLI flags still work and take
-//! precedence; `--no-gui` restores a fully headless, args-only mode.
+//! Configuration lives in `~/.config/vcam-proxy/config.toml` (and the Settings
+//! GUI / tray). Run with no arguments — features are on by default
+//! (multi-reader, auto-load module, auto-resolution, tray, GUI).
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -39,14 +29,22 @@ fn main() {
         )
         .init();
 
-    // Install shutdown handler ONCE at startup. All modes (normal, dry-run,
-    // etc.) share this same flag so Ctrl+C works consistently.
     let shutdown = Shutdown::install();
 
     let cli = Config::parse();
+
+    // Bootstrap config file on first run so settings are editable without CLI.
+    let config_path = settings::Settings::config_path();
+    let first_run = !config_path.exists();
+    if first_run {
+        match settings::Settings::create_default_file() {
+            Ok(path) => info!(path = %path.display(), "created default config (edit this instead of using CLI flags)"),
+            Err(e) => warn!(error = %e, "could not create default config file"),
+        }
+    }
+
     let settings = settings::Settings::load();
 
-    // Handle --edit-config: open config file in editor, then exit.
     if cli.edit_config {
         let path = settings::Settings::config_path();
         if let Err(e) = settings::Settings::create_default_file() {
@@ -58,14 +56,12 @@ fn main() {
         return;
     }
 
-    // Handle --show-config: display current settings and exit.
     if cli.show_config {
         let resolved = ResolvedConfig::from_cli_and_settings(&cli, &settings);
         print_settings_table(&resolved, &settings);
         return;
     }
 
-    // Handle --save-config: persist current settings, then exit.
     if cli.save_config {
         let resolved = ResolvedConfig::from_cli_and_settings(&cli, &settings);
         match resolved.to_settings().save() {
@@ -78,58 +74,37 @@ fn main() {
         return;
     }
 
-    // Handle --list: enumerate physical cameras and exit.
     if cli.list {
         capture::list_cameras();
         return;
     }
 
-    // Handle --list-loopback: enumerate output devices, print, exit.
     if cli.list_loopback {
         list_loopback_devices();
         return;
     }
 
-    // Determine whether the GUI should run. By default it does, unless the user
-    // passes --no-gui. First-run detection: no config file on disk yet.
-    let config_path = settings::Settings::config_path();
-    let first_run = !config_path.exists();
     let gui_enabled = !cli.no_gui;
-
-    // Resolve the initial config: CLI args override settings file.
     let initial_cfg = Arc::new(ResolvedConfig::from_cli_and_settings(&cli, &settings).sanitized());
-
-    // Shared live switch: GUI and tray both drive it; the sink reads it.
     let sink_switch = tray::SinkSwitch::new(true);
 
-    // Build the shared GUI state (seeded from default settings on first run so
-    // the setup window starts blank, or from the resolved config afterwards).
     let gui_state: Option<Arc<Mutex<ui::GuiState>>> = if gui_enabled {
-        let seed = if first_run {
-            ui::settings_to_resolved(&settings::Settings::default())
-        } else {
-            (*initial_cfg).clone()
-        };
+        let seed = (*initial_cfg).clone();
         Some(ui::GuiState::new(seed, first_run || cli.settings))
     } else {
         None
     };
     let gui_wake = gui_state.as_ref().map(|s| ui::GuiWake::new(s.clone()));
 
-    // Handle --setup: auto-configure system, then exit.
     if cli.setup {
         run_setup(initial_cfg.clone());
         return;
     }
 
     if first_run && gui_enabled {
-        info!("first run: opening settings window for guided setup");
+        info!("first run: opening settings window — save changes to config.toml");
     }
 
-    // Run the pipeline on a background "controller" thread. egui/winit require
-    // the event loop on the main thread, so the GUI owns main and the pipeline
-    // lives elsewhere. The controller re-spawns the pipeline when the user hits
-    // "Apply & Restart", and stops on shutdown or GUI "Quit".
     let controller = {
         let cli = cli.clone();
         let initial_cfg = initial_cfg.clone();
@@ -152,21 +127,14 @@ fn main() {
             .expect("failed to spawn controller thread")
     };
 
-    // Main thread: run the GUI if enabled; otherwise just wait for the
-    // controller to finish (it exits on shutdown / GUI Quit).
     let start_visible = first_run || cli.settings;
     match gui_state {
         Some(state) => {
-            // The window is CREATED hidden when it should start hidden:
-            // on Wayland a mapped window cannot be hidden again, so showing
-            // then hiding leaves a permanent empty window on screen.
             ui::run(state, shutdown.clone(), start_visible);
-            // GUI closed (Quit or shutdown): make sure the controller unwinds.
             shutdown.request();
             let _ = controller.join();
         }
         None => {
-            // No GUI: block until the controller thread ends on its own.
             let _ = controller.join();
         }
     }
@@ -210,6 +178,7 @@ fn run_controller(
             multi_reader = current_cfg.multi_reader,
             exclusive_caps = current_cfg.exclusive_caps,
             auto_resolution = current_cfg.auto_resolution,
+            auto_load_module = current_cfg.auto_load_module,
             "starting vcam-proxy"
         );
 
@@ -266,7 +235,7 @@ fn run_controller(
             }
         }
 
-        if cli.auto_load_module && !sink::is_module_loaded() {
+        if current_cfg.auto_load_module && !sink::is_module_loaded() {
             info!("attempting to auto-load v4l2loopback module (with auto-install fallback)");
             match sink::ensure_module_loaded_with_install(&module_params) {
                 Ok(()) => {
@@ -375,11 +344,13 @@ fn run_controller(
                         eprintln!(
                             "Error: No v4l2loopback virtual camera device found.\n\
                              \n\
-                             To create one, run:\n\
+                             Set auto_load_module = true in ~/.config/vcam-proxy/config.toml\n\
+                             (default) and restart — a polkit prompt may appear.\n\
+                             \n\
+                             Or load manually:\n\
                                sudo modprobe v4l2loopback exclusive_caps=1 card_label=vcam-proxy devices=1 video_nr=10\n\
                              \n\
-                             Or let vcam-proxy set it up: vcam-proxy --auto-load-module\n\
-                             Then verify with: vcam-proxy --list-loopback"
+                             Verify with: vcam-proxy --list-loopback"
                         );
                     }
                     sink::LoopbackError::ScanFailed { source } => {
@@ -473,7 +444,7 @@ fn run_controller(
                 for (i, p) in chosen.iter().enumerate() {
                     eprintln!("  App {} can open: {}", i + 1, p.display());
                 }
-                sink::build_multi_with_paths(chosen)
+                sink::build_multi_with_paths(chosen, current_cfg.timeout)
             } else {
                 warn!("multi-node sink: fewer than 2 loopback devices found, using single sink");
                 eprintln!("\n⚠ Multi-node mode requested ({desired_devices}) but only 1 virtual camera found.");
@@ -815,9 +786,9 @@ fn run_setup(cfg: Arc<ResolvedConfig>) {
     println!("\n[4/4] Summary");
     if ok {
         println!("        ✓ Everything looks good! You can now run:");
-        println!("          cargo run -- --auto-load-module");
-        println!("        Or just:");
-        println!("          cargo run --release");
+        println!("          cargo run");
+        println!("          # or: vcam-proxy");
+        println!("        Settings live in ~/.config/vcam-proxy/config.toml");
     } else {
         println!("        ✗ Some issues need fixing. See above for guidance.");
         println!("        After fixing, run this command again to verify.");
@@ -962,14 +933,33 @@ fn print_settings_table(cfg: &ResolvedConfig, settings: &settings::Settings) {
         cfg.timeout,
         if cfg.timeout != settings.timeout {
             'C'
-        } else if settings.timeout != 1000 {
+        } else if settings.timeout != 0 {
             'F'
+        } else {
+            'D'
+        }
+    );
+    println!(
+        "  {:<20} {:<15} [{:<1}]",
+        "auto_load_module",
+        cfg.auto_load_module,
+        if cfg.auto_load_module != settings.auto_load_module {
+            'C'
+        } else {
+            'D'
+        }
+    );
+    println!(
+        "  {:<20} {:<15} [{:<1}]",
+        "auto_resolution",
+        cfg.auto_resolution,
+        if cfg.auto_resolution != settings.auto_resolution {
+            'C'
         } else {
             'D'
         }
     );
     println!("{}", sep);
     println!("\nConfig file: {}", config_path.display());
-    println!("To edit: vcam-proxy --edit-config");
-    println!("To save current settings: vcam-proxy --save-config");
+    println!("Edit: tray → Settings…  or  vcam-proxy --edit-config");
 }

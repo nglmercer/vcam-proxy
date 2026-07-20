@@ -6,6 +6,7 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 description = "Low-latency physical-camera -> virtual-loopback proxy (v4l2loopback on Linux, Named-Pipe IPC on Windows)"
 keywords = ["camera", "v4l2", "v4l2loopback", "virtual-camera", "streaming"]
+default-run = "vcam-proxy"
 
 [dependencies]
 # CLI parsing (derive keeps it declarative and type-safe).

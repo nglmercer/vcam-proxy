@@ -15,8 +15,15 @@ pub struct V4l2LoopMultiSink {
 
 impl V4l2LoopMultiSink {
     pub fn new(paths: Vec<PathBuf>) -> Self {
+        Self::with_timeout(paths, 0)
+    }
+
+    pub fn with_timeout(paths: Vec<PathBuf>, timeout_ms: u32) -> Self {
         Self {
-            sinks: paths.into_iter().map(V4l2LoopSink::new).collect(),
+            sinks: paths
+                .into_iter()
+                .map(|p| V4l2LoopSink::with_timeout(p, timeout_ms))
+                .collect(),
         }
     }
 }

@@ -138,10 +138,7 @@ pub fn find_loopback_device(preferred: &Path) -> Result<PathBuf, LoopbackError> 
     // 2. Scan all /dev/video* for a real loopback device.
     let all_devices = discover_loopback_devices()?;
 
-    if let Some(dev) = all_devices
-        .iter()
-        .find(|d| is_loopback_driver(&d.driver))
-    {
+    if let Some(dev) = all_devices.iter().find(|d| is_loopback_driver(&d.driver)) {
         info!(device = %dev.path.display(), card = %dev.card, "auto-detected v4l2loopback device");
         return Ok(dev.path.clone());
     }

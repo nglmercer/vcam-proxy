@@ -357,6 +357,14 @@ impl eframe::App for App {
                         &mut desired.multi_reader,
                         "Multi-reader mode (multiple apps at once, single node)",
                     );
+                    ui.checkbox(
+                        &mut desired.auto_load_module,
+                        "Auto-load v4l2loopback module when missing (pkexec)",
+                    );
+                    ui.checkbox(
+                        &mut desired.auto_resolution,
+                        "Auto-resolution (highest camera mode)",
+                    );
                     ui.horizontal(|ui| {
                         ui.label("Device nodes (1-8)");
                         ui.text_edit_singleline(&mut self.devices_text);
@@ -366,7 +374,7 @@ impl eframe::App for App {
                         ui.text_edit_singleline(&mut self.exclusive_caps_text);
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Timeout (ms)");
+                        ui.label("Timeout (ms, 0=keep last frame)");
                         ui.text_edit_singleline(&mut self.timeout_text);
                     });
                     ui.label(
@@ -462,7 +470,8 @@ pub fn settings_to_resolved(s: &Settings) -> ResolvedConfig {
         devices: s.devices,
         exclusive_caps: s.exclusive_caps,
         timeout: s.timeout,
-        auto_resolution: false,
+        auto_load_module: s.auto_load_module,
+        auto_resolution: s.auto_resolution,
         image: None,
     }
 }

@@ -61,7 +61,10 @@ pub fn build_with_path(cfg: &ResolvedConfig, path: &Path) -> Box<dyn Sink> {
         SinkKind::V4l2 => {
             #[cfg(target_os = "linux")]
             {
-                Box::new(v4l2loop::V4l2LoopSink::new(path.to_path_buf()))
+                Box::new(v4l2loop::V4l2LoopSink::with_timeout(
+                    path.to_path_buf(),
+                    cfg.timeout,
+                ))
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -85,15 +88,16 @@ pub fn build_with_path(cfg: &ResolvedConfig, path: &Path) -> Box<dyn Sink> {
 }
 
 /// Build a sink that writes to *all* provided loopback device paths. This is the
-/// multi-reader path: with `devices >= 2` under v4l2loopback, each node must
+/// multi-node path: with `devices >= 2` under v4l2loopback, each node must
 /// receive the same frames or the extras appear as dead/black cameras.
-pub fn build_multi_with_paths(paths: Vec<PathBuf>) -> Box<dyn Sink> {
+pub fn build_multi_with_paths(paths: Vec<PathBuf>, timeout_ms: u32) -> Box<dyn Sink> {
     #[cfg(target_os = "linux")]
     {
-        Box::new(v4l2loop::V4l2LoopMultiSink::new(paths))
+        Box::new(v4l2loop::V4l2LoopMultiSink::with_timeout(paths, timeout_ms))
     }
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = timeout_ms;
         warn!("multi-device v4l2 sink requested on non-Linux; using null sink");
         Box::new(null::NullSink::default())
     }

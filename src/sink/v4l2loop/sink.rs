@@ -13,6 +13,8 @@ use super::scaling::ScaleContext;
 /// Writes frames to a single v4l2loopback device node.
 pub struct V4l2LoopSink {
     pub(crate) path: PathBuf,
+    /// v4l2loopback timeout control (ms); 0 = keep last frame forever.
+    timeout_ms: i64,
     active: Option<Active>,
     /// Pre-allocated scaling context with LUTs (reused across frames).
     scale_ctx: Option<ScaleContext>,
@@ -22,8 +24,13 @@ pub struct V4l2LoopSink {
 
 impl V4l2LoopSink {
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self::with_timeout(path, 0)
+    }
+
+    pub fn with_timeout(path: impl Into<PathBuf>, timeout_ms: u32) -> Self {
         V4l2LoopSink {
             path: path.into(),
+            timeout_ms: timeout_ms as i64,
             active: None,
             scale_ctx: None,
             scale_buf: Vec::new(),
@@ -47,7 +54,13 @@ impl super::super::Sink for V4l2LoopSink {
                 w = want.0, h = want.1, fmt = ?want.2,
                 "initializing loopback output"
             );
-            self.active = Some(Active::open(&self.path, want.0, want.1, want.2)?);
+            self.active = Some(Active::open(
+                &self.path,
+                want.0,
+                want.1,
+                want.2,
+                self.timeout_ms,
+            )?);
         }
 
         // Check if we need to scale (driver selected different resolution than input)
