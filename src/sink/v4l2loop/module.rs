@@ -8,6 +8,7 @@ use super::discovery::discover_loopback_devices;
 use super::distro::install_v4l2loopback;
 use super::is_loopback_driver;
 use super::module_ops::load_module_with_params;
+use super::usage::DeviceUser;
 
 /// Check if the v4l2loopback kernel module is currently loaded.
 pub fn is_module_loaded() -> bool {
@@ -108,6 +109,14 @@ pub enum ModuleError {
     DistroNotSupported,
     #[error("package install failed (exit code {0}); check network and try installing v4l2loopback-dkms manually")]
     InstallFailed(i32),
+    /// The module could not be unloaded because one or more processes are
+    /// still holding a loopback device node open. `users` names them so the
+    /// caller can tell the user exactly what to close.
+    #[error(
+        "v4l2loopback is in use by {} process(es); close them to change the device count",
+        users.len()
+    )]
+    ModuleInUse { users: Vec<DeviceUser> },
 }
 
 /// Ensure the v4l2loopback module is loaded, installing the package first if

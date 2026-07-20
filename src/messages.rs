@@ -4,6 +4,45 @@
 
 use std::path::Path;
 
+use crate::sink::DeviceUser;
+
+/// Format the list of processes holding a loopback device open.
+fn format_blockers(users: &[DeviceUser]) -> String {
+    let mut s = String::new();
+    for u in users {
+        s.push_str(&format!("  - {} (pid {})\n", u.comm, u.pid));
+    }
+    s
+}
+
+/// Print the processes currently holding the virtual camera open (the reason a
+/// module reload is blocked). Empty list → nothing printed.
+pub fn note_blockers(users: &[DeviceUser]) {
+    if users.is_empty() {
+        return;
+    }
+    eprintln!(
+        "The virtual camera is in use by {} process(es):\n{}",
+        users.len(),
+        format_blockers(users)
+    );
+}
+
+/// Message shown while retrying a reload that is blocked by busy devices.
+pub fn warn_multi_node_busy(users: &[DeviceUser], remaining: u64, module_params: &str) {
+    eprintln!(
+        "⚠ Multi-app mode needs a module reload, but the virtual camera is busy.\n\
+         \n\
+         Close these app(s) to continue (auto-retrying, ~{remaining}s left):\n\
+         {}\
+         \n\
+         Or run manually:\n\
+           sudo modprobe -r v4l2loopback\n\
+           sudo modprobe v4l2loopback {module_params}",
+        format_blockers(users)
+    );
+}
+
 /// Default `modprobe` argument string when no ResolvedConfig is available yet.
 ///
 /// NOTE: `timeout` is intentionally absent — it is not a v4l2loopback module
@@ -126,6 +165,25 @@ pub fn error_multi_node_reload(err: &impl std::fmt::Display, module_params: &str
            sudo modprobe v4l2loopback {module_params}\n\
          \n\
          Then assign each app its own camera ('vcam-proxy', 'vcam-proxy-2', …)."
+    );
+}
+
+/// Variant of [`error_multi_node_reload`] used when the reload was blocked by
+/// busy devices; `users` names exactly which processes to close.
+pub fn error_multi_node_busy(users: &[DeviceUser], module_params: &str) {
+    eprintln!(
+        "ERROR: Could not reload v4l2loopback for multi-app mode — the virtual\n\
+         camera is in use by {} process(es):\n\
+         {}\
+         \n\
+         Close these app(s), then either restart vcam-proxy or run:\n\
+         \n\
+           sudo modprobe -r v4l2loopback\n\
+           sudo modprobe v4l2loopback {module_params}\n\
+         \n\
+         Until then, only ONE app can use the single virtual camera at a time.",
+        users.len(),
+        format_blockers(users)
     );
 }
 

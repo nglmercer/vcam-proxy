@@ -38,7 +38,7 @@ fn main() {
     }
 
     let gui_enabled = !cli.no_gui;
-    let initial_cfg = Arc::new(ResolvedConfig::from_cli_and_settings(&cli, &settings).sanitized());
+    let initial_cfg = Arc::new(ResolvedConfig::from_settings(&settings).sanitized());
     let sink_switch = tray::SinkSwitch::new(true);
 
     let gui_state: Option<Arc<Mutex<ui::GuiState>>> = if gui_enabled {
@@ -106,13 +106,13 @@ fn dispatch_one_shots(cli: &Config, settings: &settings::Settings) -> bool {
     }
 
     if cli.show_config {
-        let resolved = ResolvedConfig::from_cli_and_settings(cli, settings);
+        let resolved = ResolvedConfig::from_settings(&settings);
         cli_cmds::print_settings_table(&resolved, settings);
         return true;
     }
 
     if cli.save_config {
-        let resolved = ResolvedConfig::from_cli_and_settings(cli, settings);
+        let resolved = ResolvedConfig::from_settings(&settings);
         match resolved.to_settings().save() {
             Ok(()) => println!(
                 "Settings saved to: {}",
@@ -134,7 +134,7 @@ fn dispatch_one_shots(cli: &Config, settings: &settings::Settings) -> bool {
     }
 
     if cli.setup {
-        let cfg = Arc::new(ResolvedConfig::from_cli_and_settings(cli, settings).sanitized());
+        let cfg = Arc::new(ResolvedConfig::from_settings(&settings).sanitized());
         cli_cmds::run_setup(cfg);
         return true;
     }

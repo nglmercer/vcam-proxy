@@ -33,6 +33,7 @@ pub mod multi_sink;
 pub mod permissions;
 pub mod scaling;
 pub mod sink;
+pub mod usage;
 
 // Re-export main types for convenience
 pub use discovery::{
@@ -43,6 +44,7 @@ pub use module::{
     capture_single_streamer, ensure_module_loaded_with_install, is_module_loaded, module_version,
     ModuleError,
 };
+pub use usage::{all_loopback_users, all_loopback_user_pids, device_users, DeviceUser};
 pub use module_ops::load_module_with_params_force;
 pub use multi_sink::V4l2LoopMultiSink;
 pub use permissions::{check_device_access, exclusive_caps_active, max_openers, AccessError};

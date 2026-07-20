@@ -19,6 +19,8 @@
 //! timeout = 0
 //! auto_load_module = true
 //! auto_resolution = true
+//! image = "/path/to/logo.png"   # optional: stream a still image instead of a webcam
+//! multi_app_timeout = 30         # seconds to wait for a busy camera to free up before falling back
 //! ```
 
 use std::fs;
@@ -79,6 +81,16 @@ pub struct Settings {
     /// Pick the camera's highest supported mode instead of `width`/`height`.
     #[serde(default = "default_true")]
     pub auto_resolution: bool,
+    /// Optional still image to stream instead of a webcam (demos / tests).
+    /// When set, `auto_resolution` is ignored and the image's size is used.
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Seconds to keep retrying a module reload when the virtual camera is
+    /// busy (another app holds it open). `0` = give up immediately and fall
+    /// back to single-node. Only used when the device count must change
+    /// (multi-app mode or editing `devices` via the manager).
+    #[serde(default = "default_multi_app_timeout")]
+    pub multi_app_timeout: u32,
 }
 
 fn default_device() -> String {
@@ -111,6 +123,9 @@ fn default_exclusive_caps() -> u32 {
 fn default_timeout() -> u32 {
     0
 }
+fn default_multi_app_timeout() -> u32 {
+    30
+}
 
 // NOTE: `#[serde(default = "...")]` only applies when *deserializing* a
 // (possibly partial) TOML file. It does NOT feed into `Default::default()`.
@@ -131,6 +146,8 @@ impl Default for Settings {
             timeout: default_timeout(),
             auto_load_module: true,
             auto_resolution: true,
+            image: None,
+            multi_app_timeout: default_multi_app_timeout(),
         }
     }
 }

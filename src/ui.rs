@@ -26,6 +26,7 @@ use eframe::egui;
 use crate::config::{FormatPref, ResolvedConfig, SinkKind};
 use crate::settings::Settings;
 use crate::shutdown::Shutdown;
+use crate::sink::all_loopback_users;
 
 /// Shared mutable state between the GUI thread (main) and the controller thread.
 pub struct GuiState {
@@ -123,6 +124,7 @@ struct App {
     timeout_text: String,
     exclusive_caps_text: String,
     devices_text: String,
+    multi_app_timeout_text: String,
     status: String,
 }
 
@@ -141,6 +143,7 @@ impl App {
         let timeout_text = cfg.timeout.to_string();
         let exclusive_caps_text = cfg.exclusive_caps.to_string();
         let devices_text = cfg.devices.to_string();
+        let multi_app_timeout_text = cfg.multi_app_timeout.to_string();
         drop(s);
         Self {
             state,
@@ -159,6 +162,7 @@ impl App {
             timeout_text,
             exclusive_caps_text,
             devices_text,
+            multi_app_timeout_text,
             status: String::new(),
         }
     }
@@ -202,6 +206,10 @@ impl App {
             .devices_text
             .parse()
             .map_err(|_| "devices must be a number (1-8)".to_string())?;
+        cfg.multi_app_timeout = self
+            .multi_app_timeout_text
+            .parse()
+            .map_err(|_| "multi_app_timeout must be a number (seconds)".to_string())?;
         cfg.device = self.device_text.clone();
         Ok(())
     }
@@ -376,11 +384,75 @@ impl eframe::App for App {
                     });
                 });
 
-                ui.collapsing("Multi-reader / module", |ui| {
+                ui.collapsing("Virtual cameras (manager)", |ui| {
+                    ui.label(
+                        "vcam-proxy can create several virtual cameras so multiple apps \
+                         (OBS, a browser, Zoom, …) each get their own device. Changing the \
+                         number reloads the v4l2loopback kernel module — which only succeeds \
+                         while no app is using the camera. vcam-proxy auto-retries until the \
+                         apps close.",
+                    );
+                    ui.separator();
+
+                    // Live view of the current virtual cameras and who uses them.
+                    let cameras = all_loopback_users();
+                    if cameras.is_empty() {
+                        ui.label("No virtual camera loaded yet (created on start).");
+                    } else {
+                        ui.label("Current virtual cameras:");
+                        for (dev, users) in &cameras {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("• {}  [{}]", dev.path.display(), dev.card));
+                                if users.is_empty() {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(80, 200, 120),
+                                        "free",
+                                    );
+                                } else {
+                                    let names: Vec<String> = users
+                                        .iter()
+                                        .map(|u| format!("{} (pid {})", u.comm, u.pid))
+                                        .collect();
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(230, 120, 120),
+                                        format!("in use: {}", names.join(", ")),
+                                    );
+                                }
+                            });
+                        }
+                    }
+                    ui.separator();
+
                     ui.checkbox(
                         &mut desired.multi_reader,
-                        "Multi-reader mode (multiple apps at once, single node)",
+                        "Multi-app mode (one virtual camera per app)",
                     );
+                    ui.horizontal(|ui| {
+                        ui.label("Number of virtual cameras (1-8)");
+                        ui.text_edit_singleline(&mut self.devices_text);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Reload wait when busy (seconds, 0=off)");
+                        ui.text_edit_singleline(&mut self.multi_app_timeout_text);
+                    });
+                    if ui.button("Apply & reload virtual cameras").clicked() {
+                        match self.commit(&mut desired) {
+                            Ok(()) => {
+                                let _ = desired.clone().to_settings().save();
+                                restart = true;
+                                self.status.clear();
+                                self.visible = false;
+                            }
+                            Err(e) => self.status = e,
+                        }
+                    }
+                    ui.label(
+                        "Raise the count above the current number to add cameras. The reload \
+                         runs automatically; close any app shown as ‘in use’ above if it blocks.",
+                    );
+                });
+
+                ui.collapsing("Module / advanced", |ui| {
                     ui.checkbox(
                         &mut desired.auto_load_module,
                         "Auto-load v4l2loopback module when missing (pkexec)",
@@ -390,10 +462,6 @@ impl eframe::App for App {
                         "Auto-resolution (highest camera mode)",
                     );
                     ui.horizontal(|ui| {
-                        ui.label("Device nodes (1-8)");
-                        ui.text_edit_singleline(&mut self.devices_text);
-                    });
-                    ui.horizontal(|ui| {
                         ui.label("exclusive_caps (0/1)");
                         ui.text_edit_singleline(&mut self.exclusive_caps_text);
                     });
@@ -402,9 +470,8 @@ impl eframe::App for App {
                         ui.text_edit_singleline(&mut self.timeout_text);
                     });
                     ui.label(
-                        "One node already serves multiple apps at once. Use 2+ nodes only for \
-                         apps that grab a device exclusively (requires module reload).\n\
-                         exclusive_caps=1 is required for Chrome/Firefox/Zoom to list the device as a camera.",
+                        "exclusive_caps=1 is required for Chrome/Firefox/Zoom to list the \
+                         device as a camera.",
                     );
                 });
             });
@@ -496,6 +563,7 @@ pub fn settings_to_resolved(s: &Settings) -> ResolvedConfig {
         timeout: s.timeout,
         auto_load_module: s.auto_load_module,
         auto_resolution: s.auto_resolution,
-        image: None,
+        image: s.image.clone(),
+        multi_app_timeout: s.multi_app_timeout,
     }
 }

@@ -4,11 +4,16 @@ use std::io;
 use std::process::Command;
 use std::time::Duration;
 
-use tracing::info;
+use tracing::{info, warn};
 
 use super::module::{count_loopback_devices, is_module_loaded, ModuleError};
+use super::usage::all_loopback_user_pids;
 
 /// Unload the v4l2loopback kernel module via pkexec.
+///
+/// Returns [`ModuleError::ModuleInUse`] (with the list of blocking processes)
+/// when `modprobe -r` fails because a device node is still held open, so the
+/// caller can tell the user exactly what to close instead of a generic error.
 pub fn unload_module() -> Result<(), ModuleError> {
     if !is_module_loaded() {
         return Ok(());
@@ -38,13 +43,25 @@ pub fn unload_module() -> Result<(), ModuleError> {
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(ModuleError::LoadFailed {
-                reason: format!(
-                    "pkexec modprobe -r failed (exit {:?}): {}",
-                    output.status.code(),
-                    stderr.trim()
-                ),
-            })
+            let busy = stderr.contains("is in use")
+                || stderr.contains("Device or resource busy")
+                || stderr.contains("EBUSY");
+            if busy {
+                let users = all_loopback_user_pids();
+                warn!(
+                    users = users.len(),
+                    "v4l2loopback unload blocked: device node(s) held open by other processes"
+                );
+                Err(ModuleError::ModuleInUse { users })
+            } else {
+                Err(ModuleError::LoadFailed {
+                    reason: format!(
+                        "pkexec modprobe -r failed (exit {:?}): {}",
+                        output.status.code(),
+                        stderr.trim()
+                    ),
+                })
+            }
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Err(ModuleError::PkexecNotAvailable),
         Err(e) => Err(ModuleError::LoadFailed {

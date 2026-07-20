@@ -1,8 +1,12 @@
-//! Command-line surface — optional overrides only.
+//! Command-line surface — one-shot utilities only.
 //!
-//! Prefer `~/.config/vcam-proxy/config.toml` (or the Settings GUI). CLI flags
-//! exist for one-shot utilities (`--list`, `--setup`) and rare overrides.
-//! A plain `vcam-proxy` / `cargo run` uses config defaults with every feature on.
+//! All runtime configuration lives in `~/.config/vcam-proxy/config.toml` (or the
+//! Settings GUI). There are intentionally **no** override flags: editing the
+//! config file (or the in-app manager) is the only way to change behaviour, so
+//! the active configuration is always reproducible and persisted.
+//!
+//! A plain `vcam-proxy` / `cargo run` loads the config and starts. The flags
+//! below are diagnostic/utility actions that exit immediately.
 
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
@@ -12,8 +16,8 @@ use serde::{Deserialize, Serialize};
     name = "vcam-proxy",
     version,
     about = "Physical camera -> virtual loopback proxy (configure via ~/.config/vcam-proxy/config.toml)",
-    after_help = "Tip: edit ~/.config/vcam-proxy/config.toml or use the tray Settings window.\n\
-                  Most runs need no flags:  cargo run   /   vcam-proxy"
+    after_help = "All options live in ~/.config/vcam-proxy/config.toml or the tray Settings window.\n\
+                  Just run:  cargo run   /   vcam-proxy"
 )]
 pub struct Config {
     /// Enumerate capture devices and exit.
@@ -28,7 +32,7 @@ pub struct Config {
     #[arg(long)]
     pub setup: bool,
 
-    /// Save current effective settings to the config file and exit.
+    /// Save current settings to the config file and exit.
     #[arg(long)]
     pub save_config: bool,
 
@@ -55,71 +59,6 @@ pub struct Config {
     /// Disable the system-tray icon.
     #[arg(long)]
     pub no_tray: bool,
-
-    /// Feed a still image instead of a webcam (demos / tests).
-    #[arg(long, value_name = "PATH")]
-    pub image: Option<String>,
-
-    // ---- Optional overrides (prefer config.toml) ----
-    /// Override: camera index.
-    #[arg(short, long)]
-    pub camera: Option<u32>,
-
-    /// Override: sink backend.
-    #[arg(long, value_enum)]
-    pub sink: Option<SinkKind>,
-
-    /// Override: loopback device node.
-    #[arg(short, long)]
-    pub device: Option<String>,
-
-    /// Override: named-pipe name (Windows).
-    #[arg(long)]
-    pub pipe_name: Option<String>,
-
-    /// Override: capture width (also disables auto_resolution).
-    #[arg(long)]
-    pub width: Option<u32>,
-
-    /// Override: capture height (also disables auto_resolution).
-    #[arg(long)]
-    pub height: Option<u32>,
-
-    /// Override: capture frame rate.
-    #[arg(long)]
-    pub fps: Option<u32>,
-
-    /// Override: wire format policy.
-    #[arg(long, value_enum)]
-    pub format: Option<FormatPref>,
-
-    /// Override: ring buffer depth.
-    #[arg(long)]
-    pub buffers: Option<usize>,
-
-    /// Override: camera re-open backoff (ms).
-    #[arg(long)]
-    pub retry_ms: Option<u64>,
-
-    /// Override: auto-load v4l2loopback when missing (`true`/`false`).
-    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-    pub auto_load_module: Option<bool>,
-
-    /// Override: multi-reader mode (`true`/`false`).
-    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-    pub multi_reader: Option<bool>,
-
-    /// Override: number of v4l2loopback nodes.
-    #[arg(long)]
-    pub devices: Option<u32>,
-
-    /// Override: exclusive_caps (0 or 1).
-    #[arg(long)]
-    pub exclusive_caps: Option<u32>,
-
-    /// Override: v4l2loopback timeout ms (`0` = keep last frame).
-    #[arg(long)]
-    pub timeout: Option<u32>,
 }
 
 /// Resolved configuration: config file + optional CLI overrides.
@@ -144,44 +83,46 @@ pub struct ResolvedConfig {
     /// When true, capture negotiates the camera's highest supported mode.
     pub auto_resolution: bool,
     pub image: Option<String>,
+    /// Seconds to keep retrying a module reload when the virtual camera is
+    /// busy (another app is using it). `0` disables the wait and falls back
+    /// to single-node immediately. Only relevant when the device count must
+    /// change (multi-app mode / editing devices via the manager).
+    pub multi_app_timeout: u32,
 }
 
 impl ResolvedConfig {
-    /// Merge CLI overrides over settings-file values.
-    pub fn from_cli_and_settings(cli: &Config, settings: &crate::settings::Settings) -> Self {
-        let image = cli.image.clone();
-        // Explicit --width/--height or --image pins geometry; otherwise honor
-        // the config's auto_resolution flag (default true).
-        let auto_resolution = if image.is_some() || cli.width.is_some() || cli.height.is_some() {
+    /// Build a resolved config purely from the persisted settings file.
+    ///
+    /// There are no CLI overrides by design: the config file (or the in-app
+    /// manager) is the single source of truth, so the active configuration is
+    /// always reproducible.
+    pub fn from_settings(settings: &crate::settings::Settings) -> Self {
+        // An explicit `image` pins geometry; otherwise honor auto_resolution.
+        let auto_resolution = if settings.image.is_some() {
             false
         } else {
             settings.auto_resolution
         };
 
         Self {
-            camera: cli.camera.unwrap_or(settings.camera),
-            sink: cli.sink.unwrap_or(SinkKind::Auto),
-            device: cli
-                .device
-                .clone()
-                .unwrap_or_else(|| settings.device.clone()),
-            pipe_name: cli
-                .pipe_name
-                .clone()
-                .unwrap_or_else(|| "vcam_proxy_0".to_string()),
-            width: cli.width.unwrap_or(settings.width),
-            height: cli.height.unwrap_or(settings.height),
-            fps: cli.fps.unwrap_or(settings.fps),
-            format: cli.format.unwrap_or(settings.format),
-            buffers: cli.buffers.unwrap_or(settings.buffers),
-            retry_ms: cli.retry_ms.unwrap_or(settings.retry_ms),
-            multi_reader: cli.multi_reader.unwrap_or(settings.multi_reader),
-            devices: cli.devices.unwrap_or(settings.devices),
-            exclusive_caps: cli.exclusive_caps.unwrap_or(settings.exclusive_caps),
-            timeout: cli.timeout.unwrap_or(settings.timeout),
-            auto_load_module: cli.auto_load_module.unwrap_or(settings.auto_load_module),
+            camera: settings.camera,
+            sink: SinkKind::Auto,
+            device: settings.device.clone(),
+            pipe_name: "vcam_proxy_0".to_string(),
+            width: settings.width,
+            height: settings.height,
+            fps: settings.fps,
+            format: settings.format,
+            buffers: settings.buffers,
+            retry_ms: settings.retry_ms,
+            multi_reader: settings.multi_reader,
+            devices: settings.devices,
+            exclusive_caps: settings.exclusive_caps,
+            timeout: settings.timeout,
+            auto_load_module: settings.auto_load_module,
             auto_resolution,
-            image,
+            image: settings.image.clone(),
+            multi_app_timeout: settings.multi_app_timeout,
         }
     }
 
@@ -217,6 +158,8 @@ impl ResolvedConfig {
             timeout: self.timeout,
             auto_load_module: self.auto_load_module,
             auto_resolution: self.auto_resolution,
+            image: self.image.clone(),
+            multi_app_timeout: self.multi_app_timeout,
         }
     }
 }

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
@@ -81,7 +81,7 @@ pub fn run(
         );
 
         ensure_module(&current_cfg, &module_params);
-        ensure_multi_node(desired_devices, &module_params);
+        ensure_multi_node(&current_cfg, desired_devices, &module_params);
 
         let loopback_path = match sink::find_loopback_device(Path::new(&current_cfg.device)) {
             Ok(path) => path,
@@ -268,7 +268,7 @@ fn ensure_module(cfg: &ResolvedConfig, module_params: &str) {
     }
 }
 
-fn ensure_multi_node(desired_devices: u32, module_params: &str) {
+fn ensure_multi_node(cfg: &ResolvedConfig, desired_devices: u32, module_params: &str) {
     if desired_devices < 2 || !sink::is_module_loaded() {
         return;
     }
@@ -285,28 +285,54 @@ fn ensure_multi_node(desired_devices: u32, module_params: &str) {
     );
     messages::note_multi_node_reload(desired_devices, current_devices);
 
-    match sink::load_module_with_params_force(module_params) {
-        Ok(()) => {
-            let mut devices_ready = false;
-            for _ in 0..50 {
-                std::thread::sleep(Duration::from_millis(200));
-                if sink::count_loopback_devices() >= desired_devices as usize {
-                    devices_ready = true;
+    // The device count can only change by unloading + reloading the module,
+    // which fails (EBUSY) while any app holds a node open. Retry with backoff
+    // up to `multi_app_timeout` seconds so the reload "just works" once the
+    // user closes the blocking app — instead of failing instantly.
+    let timeout = Duration::from_secs(cfg.multi_app_timeout as u64);
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        match sink::load_module_with_params_force(module_params) {
+            Ok(()) => {
+                let mut devices_ready = false;
+                for _ in 0..50 {
+                    std::thread::sleep(Duration::from_millis(200));
+                    if sink::count_loopback_devices() >= desired_devices as usize {
+                        devices_ready = true;
+                        break;
+                    }
+                }
+                if devices_ready {
+                    messages::note_multi_node_ready(desired_devices);
+                    info!(desired_devices, "{}", messages::LOG_MULTI_NODE_OK);
+                } else {
+                    let found = sink::count_loopback_devices();
+                    warn!(found, "module reloaded but devices still missing");
+                    messages::warn_multi_node_partial(found, module_params);
+                }
+                break;
+            }
+            Err(sink::ModuleError::ModuleInUse { users }) => {
+                messages::note_blockers(&users);
+                if timeout.is_zero() || Instant::now() >= deadline {
+                    warn!(
+                        "{}",
+                        "gave up waiting for the virtual camera to be freed; \
+                         continuing with single node"
+                    );
+                    messages::error_multi_node_busy(&users, module_params);
                     break;
                 }
+                let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
+                messages::warn_multi_node_busy(&users, remaining, module_params);
+                std::thread::sleep(Duration::from_secs(2));
             }
-            if devices_ready {
-                messages::note_multi_node_ready(desired_devices);
-                info!(desired_devices, "{}", messages::LOG_MULTI_NODE_OK);
-            } else {
-                let found = sink::count_loopback_devices();
-                warn!(found, "module reloaded but devices still missing");
-                messages::warn_multi_node_partial(found, module_params);
+            Err(e) => {
+                warn!(error = %e, "{}", messages::LOG_MULTI_NODE_RELOAD_FAIL);
+                messages::error_multi_node_reload(&e, module_params);
+                break;
             }
-        }
-        Err(e) => {
-            warn!(error = %e, "{}", messages::LOG_MULTI_NODE_RELOAD_FAIL);
-            messages::error_multi_node_reload(&e, module_params);
         }
     }
 }
