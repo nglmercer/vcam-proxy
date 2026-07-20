@@ -22,6 +22,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Serialization for config file persistence.
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+# Still-image source (`--image`) and test fixtures.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # XDG-based config directories (cross-platform).
 dirs = "5"
 # Open files/URLs with the system's default handler.
@@ -75,6 +77,10 @@ nokhwa = { version = "0.10.11", default-features = false, features = [
 # a given pixel format (e.g. YUYV maxes at 640x480 but works at higher res via MJPEG).
 [patch.crates-io]
 nokhwa-core = { path = "vendor/nokhwa-core" }
+
+[dev-dependencies]
+tempfile = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [profile.release]
 opt-level = 3

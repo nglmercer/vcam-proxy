@@ -129,6 +129,11 @@ pub struct Config {
     /// Show the current settings and their source (CLI / config file / default).
     #[arg(long)]
     pub show_config: bool,
+
+    /// Feed a still image into the virtual camera instead of a physical webcam.
+    /// Useful for demos and the pixel-integrity test suite. Path to PNG/JPEG/etc.
+    #[arg(long, value_name = "PATH")]
+    pub image: Option<String>,
 }
 
 /// Resolved configuration with all values populated from CLI + settings file.
@@ -156,6 +161,8 @@ pub struct ResolvedConfig {
     /// `--width`/`--height` on the CLI. `width`/`height`/`fps` still hold the
     /// fallback geometry used if the capability query fails.
     pub auto_resolution: bool,
+    /// When set, capture from this still image instead of a physical camera.
+    pub image: Option<String>,
 }
 
 impl ResolvedConfig {
@@ -183,8 +190,10 @@ impl ResolvedConfig {
             exclusive_caps: cli.exclusive_caps.unwrap_or(settings.exclusive_caps),
             timeout: cli.timeout.unwrap_or(settings.timeout),
             // Auto-pick the camera's max resolution unless the user pinned a
-            // specific geometry via the CLI.
-            auto_resolution: cli.width.is_none() && cli.height.is_none(),
+            // specific geometry via the CLI. Image mode always uses the
+            // explicit/config geometry (no camera capability query).
+            auto_resolution: cli.image.is_none() && cli.width.is_none() && cli.height.is_none(),
+            image: cli.image.clone(),
         }
     }
 

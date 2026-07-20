@@ -14,28 +14,23 @@
 //! is reachable afterwards from the tray icon. CLI flags still work and take
 //! precedence; `--no-gui` restores a fully headless, args-only mode.
 
-mod capture;
-mod config;
-mod convert;
-mod frame;
-mod pipeline;
-mod settings;
-mod shutdown;
-mod sink;
-mod tray;
-mod ui;
-
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::Parser;
-use config::{Config, ResolvedConfig};
-use frame::BufferPool;
-use pipeline::Stats;
-use shutdown::Shutdown;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+use vcam_proxy::capture;
+use vcam_proxy::config::{Config, ResolvedConfig};
+use vcam_proxy::frame::BufferPool;
+use vcam_proxy::image_source;
+use vcam_proxy::pipeline::{self, Stats};
+use vcam_proxy::settings;
+use vcam_proxy::shutdown::Shutdown;
+use vcam_proxy::sink;
+use vcam_proxy::tray;
+use vcam_proxy::ui;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -220,7 +215,7 @@ fn run_controller(
 
         if matches!(
             current_cfg.format,
-            config::FormatPref::Rgb24 | config::FormatPref::Mjpeg
+            vcam_proxy::config::FormatPref::Rgb24 | vcam_proxy::config::FormatPref::Mjpeg
         ) {
             tracing::warn!(
                 format = ?current_cfg.format,
@@ -508,7 +503,18 @@ fn run_controller(
             stats.clone(),
             sink_switch.clone(),
         );
-        let capture_handle = capture::spawn(current_cfg.clone(), pool, tx, shutdown.clone(), stats);
+        let capture_handle = if let Some(ref image_path) = current_cfg.image {
+            image_source::spawn(
+                current_cfg.clone(),
+                std::path::PathBuf::from(image_path),
+                pool,
+                tx,
+                shutdown.clone(),
+                stats,
+            )
+        } else {
+            capture::spawn(current_cfg.clone(), pool, tx, shutdown.clone(), stats)
+        };
 
         // ---- Block until shutdown, GUI "Apply & Restart", or GUI "Quit" ----
         let restart = block_until_done(&gui_state, &sink_switch, &shutdown);

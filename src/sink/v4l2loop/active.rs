@@ -146,7 +146,9 @@ impl Active {
 
         // Re-enable keep_format + sustain_framerate so the virtual camera keeps advertising
         // a fixed format to CAPTURE clients (Chrome, Firefox, Zoom) between attaches.
-        apply_loopback_controls(&dev, cids);
+        // timeout=0 means "never expire the last frame" — readers can reopen the
+        // device without seeing a green timeout flash between producer frames.
+        apply_loopback_controls(&dev, cids, 0);
 
         let stream = MmapStream::with_buffers(&dev, Type::VideoOutput, NUM_KBUF)?;
 
@@ -158,19 +160,6 @@ impl Active {
     }
 
     pub(crate) fn write(&mut self, payload: &[u8]) -> io::Result<()> {
-        let (buf, meta) = self.stream.next().map_err(|e| {
-            io::Error::other(format!("failed to get output buffer: {e}"))
-        })?;
-
-        if meta.bytesused != 0 {
-            // Buffer still held by kernel (no reader drained it yet). Drop this
-            // frame rather than block — the sink thread stays responsive.
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "no consumer attached to virtual device",
-            ));
-        }
-
         // Packed formats must exactly fill one video frame; a mismatch would
         // corrupt the loopback stream, so reject instead of writing partials.
         let (w, h, fmt) = self.negotiated;
@@ -186,6 +175,11 @@ impl Active {
                 ));
             }
         }
+
+        let (buf, meta) = self.stream.next().map_err(|e| {
+            io::Error::other(format!("failed to get output buffer: {e}"))
+        })?;
+
         // Never overrun the kernel-mapped buffer (e.g. if the driver handed
         // back a smaller sizeimage than the frame needs) — error out instead
         // of panicking on the slice copy.
@@ -199,7 +193,16 @@ impl Active {
                 ),
             ));
         }
+
+        // CRITICAL: set bytesused to the real frame size before the next
+        // OutputStream::next() call queues this buffer. Leaving it at 0 makes
+        // the kernel advertise the full page-aligned mmap length (trailing
+        // zeros → classic YUYV green flash). Returning early after next()
+        // without filling also queues a garbage buffer on the following write.
+        // See v4l's stream_forward_mmap example and V4L2 buffer docs.
         buf[..payload.len()].copy_from_slice(payload);
+        meta.bytesused = payload.len() as u32;
+        meta.field = 0;
         Ok(())
     }
 }
@@ -220,7 +223,10 @@ fn disable_keep_format(dev: &Device, cid: u32) {
 
 /// Enable keep_format + sustain_framerate so the virtual camera keeps advertising
 /// a fixed format to CAPTURE clients (Chrome, Firefox, Zoom) between attaches.
-fn apply_loopback_controls(dev: &Device, cids: LoopbackCids) {
+///
+/// `timeout_ms`: v4l2loopback frame timeout. `0` keeps the last good frame
+/// forever (avoids green timeout frames when a reader reconnects).
+fn apply_loopback_controls(dev: &Device, cids: LoopbackCids, timeout_ms: i64) {
     for (id, name, value) in [
         (cids.keep_format, "keep_format", CtrlValue::Boolean(true)),
         (
@@ -228,7 +234,7 @@ fn apply_loopback_controls(dev: &Device, cids: LoopbackCids) {
             "sustain_framerate",
             CtrlValue::Boolean(true),
         ),
-        (cids.timeout, "timeout", CtrlValue::Integer(3000)),
+        (cids.timeout, "timeout", CtrlValue::Integer(timeout_ms)),
     ] {
         match dev.set_control(Control { id, value }) {
             Ok(()) => debug!(control = name, "loopback control set"),

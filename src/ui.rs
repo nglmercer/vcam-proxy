@@ -214,11 +214,26 @@ impl eframe::App for App {
         };
         if want_open {
             self.visible = true;
-            // Wayland-safe show: the window may be minimized (our "hidden"
-            // state) or never-yet-mapped; un-minimize + map + focus it.
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            // Wayland-safe show: map the window (first time) and raise/focus
+            // it. `Focus` uses xdg-activation, which is what restores a
+            // minimized window on KWin/Mutter — xdg-shell has NO un-minimize
+            // request, so we never send `Minimized(false)` (it is ignored and
+            // only spams "Unminimizing is ignored on Wayland" warnings).
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+
+        // Exit path: the Quit button (or process shutdown) must close the
+        // native window so `run_native` returns and the process can exit.
+        {
+            let (quit, shutting_down) = {
+                let g = self.state.lock().unwrap();
+                (g.quit, self.shutdown.is_set())
+            };
+            if quit || shutting_down {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
         }
 
         // Closing the window (vs. an explicit Quit) just hides it — the app
@@ -248,8 +263,9 @@ impl eframe::App for App {
             return;
         }
 
-        // Visible: actually show and draw the UI.
-        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        // Visible: actually show and draw the UI. (No Minimized(false) here:
+        // un-minimize does not exist on Wayland; restoration happens through
+        // the Focus/activation command in the open-request path above.)
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
 
         // Visible: edit a local copy so we don't fight the borrow checker, then
@@ -403,20 +419,19 @@ impl eframe::App for App {
                             let _ = desired.clone().to_settings().save();
                             restart = true;
                             self.status.clear();
+                            // Hides to the taskbar (minimized) via the hidden
+                            // branch on the next frame.
                             self.visible = false;
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                         }
                         Err(e) => self.status = e,
                     }
                 }
                 if ui.button("Hide").clicked() {
                     self.visible = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
                 if ui.button("Quit").clicked() {
+                    // The exit path at the top of `update` closes the window.
                     quit = true;
-                    self.visible = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
             });
         });
@@ -448,5 +463,6 @@ pub fn settings_to_resolved(s: &Settings) -> ResolvedConfig {
         exclusive_caps: s.exclusive_caps,
         timeout: s.timeout,
         auto_resolution: false,
+        image: None,
     }
 }

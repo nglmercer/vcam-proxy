@@ -29,9 +29,10 @@ pub use v4l2loop::{
 };
 
 pub trait Sink: Send {
-    /// Write one frame. `WouldBlock` signals "no consumer attached / reader
-    /// behind" and is counted as a graceful drop by the caller; any other
-    /// error triggers device re-initialization on the next frame.
+    /// Write one frame. `WouldBlock` / `TimedOut` may still surface when the
+    /// kernel output queue cannot accept another buffer (rare with
+    /// v4l2loopback); any other error triggers device re-initialization on
+    /// the next frame.
     fn write(&mut self, frame: &Frame) -> io::Result<()>;
     fn describe(&self) -> String;
 }
