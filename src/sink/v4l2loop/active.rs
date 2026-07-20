@@ -176,10 +176,12 @@ impl Active {
             }
         }
 
-        let (buf, meta) = self
-            .stream
-            .next()
-            .map_err(|e| io::Error::other(format!("failed to get output buffer: {e}")))?;
+        let (buf, meta) = self.stream.next().map_err(|e| {
+            // Preserve the original error kind (WouldBlock, TimedOut, etc.)
+            // so the sink can distinguish back-pressure from real failures and
+            // avoid disruptive device reopens on transient errors.
+            io::Error::new(e.kind(), format!("failed to get output buffer: {e}"))
+        })?;
 
         // Never overrun the kernel-mapped buffer (e.g. if the driver handed
         // back a smaller sizeimage than the frame needs) — error out instead

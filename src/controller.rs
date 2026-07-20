@@ -167,6 +167,26 @@ fn ensure_module(cfg: &ResolvedConfig, module_params: &str) {
             Some(true) => info!("{}", messages::LOG_EXCLUSIVE_CAPS_OK),
             None => {}
         }
+
+        // Check max_openers for multi-reader support. If the module was
+        // loaded by a previous run or the user with a low max_openers, only
+        // one app can read the virtual camera at a time — the exact symptom
+        // "OBS works but vcam-proxy doesn't for multiple apps".
+        if cfg.multi_reader {
+            if let Some(max) = sink::max_openers() {
+                if max < 2 {
+                    warn!(
+                        max_openers = max,
+                        "v4l2loopback max_openers is {}, which blocks multiple apps from \
+                         reading the virtual camera at once. Reload the module:\n  \
+                         sudo modprobe -r v4l2loopback\n  sudo modprobe v4l2loopback {}",
+                        max, module_params,
+                    );
+                } else {
+                    info!(max_openers = max, "max_openers sufficient for multi-reader");
+                }
+            }
+        }
     }
 
     if !(cfg.auto_load_module && !sink::is_module_loaded()) {

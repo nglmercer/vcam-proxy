@@ -59,6 +59,21 @@ pub fn exclusive_caps_active() -> Option<bool> {
     Some(matches!(first, "Y" | "y" | "1"))
 }
 
+/// Read the current v4l2loopback `max_openers` module parameter (first device).
+///
+/// `max_openers` controls how many file descriptors can open the loopback
+/// device simultaneously. With `max_openers < 2` only one app can read the
+/// virtual camera at a time — the writer (vcam-proxy) counts as one opener,
+/// so at least 2 are needed for a single reader, and more for multi-reader.
+///
+/// Returns `None` if the module isn't loaded or the parameter can't be read.
+pub fn max_openers() -> Option<u32> {
+    let raw = fs::read_to_string("/sys/module/v4l2loopback/parameters/max_openers").ok()?;
+    // Array parameter: one value per device, comma-separated (e.g. "16,16,16").
+    let first = raw.split(',').next()?.trim();
+    first.parse().ok()
+}
+
 /// Error type for device access validation.
 #[derive(Debug, thiserror::Error)]
 pub enum AccessError {

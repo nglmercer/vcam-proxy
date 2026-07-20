@@ -65,7 +65,7 @@ auto_resolution = true      # use camera's highest mode
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `multi_reader` | `true` | Several apps can open the virtual cam at once |
+| `multi_reader` | `true` | Several apps can open the virtual cam at once (OBS-style persistent output) |
 | `auto_load_module` | `true` | Load/install v4l2loopback automatically |
 | `auto_resolution` | `true` | Prefer max camera mode over `width`/`height` |
 | `exclusive_caps` | `1` | Required for Chrome/Firefox/Zoom to list the device |
@@ -107,6 +107,8 @@ echo 'v4l2loopback' | sudo tee /etc/modules-load.d/v4l2loopback.conf
 
 Tray (ksni) works on GNOME/KDE Wayland. The winit message *“Unminimizing is ignored on Wayland”* is a compositor protocol limit — harmless. Settings reopen via tray **Focus**, not un-minimize.
 
+Viewport commands (`Minimized`/`Visible`) are only sent on **state transitions**, not every frame — this eliminates redundant Wayland xdg-toplevel protocol spam that previously occurred every 200ms while the window was hidden.
+
 Headless: `cargo run -- --no-gui --no-tray`
 
 ---
@@ -129,8 +131,25 @@ cargo test --test pixel_integrity multi_reader_pixel_integrity -- --ignored --no
 | No virtual device | Ensure `auto_load_module = true`, approve pkexec, or `sudo modprobe v4l2loopback …` |
 | Permission denied | `sudo usermod -aG video $USER` then re-login |
 | Not listed in Chrome/Zoom | `exclusive_caps = 1` (reload module if it was loaded with `0`) |
+| Second app can't open the camera | Reload module with `max_openers=16`: `sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback exclusive_caps=1 max_openers=16 devices=1 video_nr=10` |
 | Green blink / reconnect flash | Fixed in current builds; keep `timeout = 0` |
 | `cargo run` asks which binary | Fixed via `default-run = "vcam-proxy"` — use plain `cargo run` |
+
+### Why multiple apps couldn't read the virtual camera (fixed)
+
+Previously, vcam-proxy re-opened the v4l2loopback OUTPUT device on **every** transient write error
+and on **every** pixel-format change. Each re-open calls `VIDIOC_S_FMT` + toggles `keep_format`,
+which tears down all attached CAPTURE clients (OBS, Chrome, Zoom) — so a second app trying to
+open the camera while the first was streaming would fail or disconnect the first.
+
+OBS avoids this by opening its output fd **once** and writing forever. vcam-proxy now does the same:
+
+- The OUTPUT fd is opened on the first frame and kept alive across transient errors.
+- The device is only re-opened after **60 consecutive** write failures (~2s at 30fps), which
+  only happens when the device is truly gone (module unloaded, node removed).
+- Back-pressure (`WouldBlock`/`TimedOut` — no reader draining) never triggers a re-open.
+- The `max_openers` module parameter is checked at startup and a warning is logged if it's
+  too low for multi-reader mode.
 
 ---
 

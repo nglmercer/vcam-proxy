@@ -105,6 +105,13 @@ struct App {
     /// don't toggle visibility every frame (which made the window flash to
     /// black right after opening).
     visible: bool,
+    /// Tracks the last visibility state we sent to the viewport, to avoid
+    /// redundant Wayland protocol messages. On Wayland, repeatedly sending
+    /// `Minimized(true)` every 200ms while hidden spams the compositor with
+    /// xdg-toplevel events; this flag ensures we only send it once on
+    /// transition. Similarly, `Visible(true)` is only sent when transitioning
+    /// from hidden to shown.
+    shown: bool,
     // Local UI scratch values (so we can validate before committing).
     camera_text: String,
     device_text: String,
@@ -139,6 +146,9 @@ impl App {
             state,
             shutdown,
             visible: open_immediately,
+            // If we start visible, the viewport was created with Visible(true)
+            // so we're already "shown". If hidden, we haven't sent any command.
+            shown: open_immediately,
             camera_text,
             device_text,
             width_text,
@@ -221,6 +231,7 @@ impl eframe::App for App {
             // only spams "Unminimizing is ignored on Wayland" warnings).
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.shown = true;
         }
 
         // Exit path: the Quit button (or process shutdown) must close the
@@ -257,8 +268,15 @@ impl eframe::App for App {
         // "Hidden" is implemented as minimized because Wayland cannot unmap a
         // toplevel window (Visible(false) is a no-op there and used to leave
         // an empty undrawn window on screen).
+        //
+        // Only send Minimized(true) on the transition from shown → hidden.
+        // Repeatedly sending it every 200ms while hidden spams the Wayland
+        // compositor with redundant xdg-toplevel events.
         if !self.visible {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            if self.shown {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                self.shown = false;
+            }
             ctx.request_repaint_after(Duration::from_millis(200));
             return;
         }
@@ -266,7 +284,13 @@ impl eframe::App for App {
         // Visible: actually show and draw the UI. (No Minimized(false) here:
         // un-minimize does not exist on Wayland; restoration happens through
         // the Focus/activation command in the open-request path above.)
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        //
+        // Only send Visible(true) on the transition from hidden → visible,
+        // avoiding redundant Wayland protocol messages every frame.
+        if !self.shown {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            self.shown = true;
+        }
 
         // Visible: edit a local copy so we don't fight the borrow checker, then
         // write changes back to the shared state after the frame.
