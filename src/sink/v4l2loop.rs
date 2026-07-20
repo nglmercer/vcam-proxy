@@ -514,39 +514,111 @@ fn fourcc_to_pixel_format(fourcc: &[u8; 4]) -> Option<PixelFormat> {
     }
 }
 
-/// Scale an NV12 frame from (src_w, src_h) to (dst_w, dst_h) using nearest-neighbor.
-/// Returns None if buffer sizes are insufficient.
-fn scale_nv12(src: &[u8], dst: &mut [u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> bool {
-    let (sw, sh, dw, dh) = (src_w as usize, src_h as usize, dst_w as usize, dst_h as usize);
-    let src_y_size = sw * sh;
-    let dst_y_size = dw * dh;
-    if src.len() < src_y_size * 3 / 2 || dst.len() < dst_y_size * 3 / 2 {
-        return false;
+/// Pre-computed scaling lookup tables for fast resize.
+/// Avoids per-pixel division in the hot path.
+struct ScaleLUT {
+    /// Maps dst x -> src x for Y plane
+    x_lut: Vec<usize>,
+    /// Maps dst y -> src y for Y plane
+    y_lut: Vec<usize>,
+    /// Maps dst uv x -> src uv x for UV plane
+    uv_x_lut: Vec<usize>,
+    /// Maps dst uv y -> src uv y for UV plane
+    uv_y_lut: Vec<usize>,
+}
+
+impl ScaleLUT {
+    fn new(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Self {
+        let mut x_lut = Vec::with_capacity(dst_w as usize);
+        let mut y_lut = Vec::with_capacity(dst_h as usize);
+        let mut uv_x_lut = Vec::with_capacity(dst_w as usize);
+        let mut uv_y_lut = Vec::with_capacity((dst_h / 2) as usize);
+
+        // Luma (Y) plane LUTs
+        for x in 0..dst_w as usize {
+            x_lut.push((x * src_w as usize) / dst_w as usize);
+        }
+        for y in 0..dst_h as usize {
+            y_lut.push((y * src_h as usize) / dst_h as usize);
+        }
+
+        // Chroma (UV) plane LUTs - NV12 UV is at half vertical resolution
+        for x in 0..dst_w as usize {
+            uv_x_lut.push((x * src_w as usize) / dst_w as usize);
+        }
+        for y in 0..(dst_h / 2) as usize {
+            uv_y_lut.push((y * (src_h / 2) as usize) / (dst_h / 2) as usize);
+        }
+
+        ScaleLUT {
+            x_lut,
+            y_lut,
+            uv_x_lut,
+            uv_y_lut,
+        }
     }
+}
 
-    let (src_y, src_uv) = src.split_at(src_y_size);
-    let (dst_y, dst_uv) = dst.split_at_mut(dst_y_size);
+/// Scaling context with pre-computed LUTs and reusable buffers.
+/// Eliminates per-frame allocations and division operations.
+struct ScaleContext {
+    lut: ScaleLUT,
+    src_w: usize,
+    src_h: usize,
+    dst_w: usize,
+    dst_h: usize,
+}
 
-    // Scale Y plane (luma) - nearest neighbor
-    for y in 0..dh {
-        let src_y_idx = (y * sh / dh) * sw;
-        for x in 0..dw {
-            let src_x = x * sw / dw;
-            dst_y[y * dw + x] = src_y[src_y_idx + src_x];
+impl ScaleContext {
+    fn new(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Self {
+        ScaleContext {
+            lut: ScaleLUT::new(src_w, src_h, dst_w, dst_h),
+            src_w: src_w as usize,
+            src_h: src_h as usize,
+            dst_w: dst_w as usize,
+            dst_h: dst_h as usize,
         }
     }
 
-    // Scale UV plane (chroma) - NV12 has interleaved UV at half resolution
-    let (src_uv_h, dst_uv_h) = (sh / 2, dh / 2);
-    let (src_uv_stride, dst_uv_stride) = (sw, dw);
-    for y in 0..dst_uv_h {
-        let src_y_idx = (y * src_uv_h / dst_uv_h) * src_uv_stride;
-        for x in 0..dst_uv_stride {
-            let src_x = x * src_uv_stride / dst_uv_stride;
-            dst_uv[y * dst_uv_stride + x] = src_uv[src_y_idx + src_x];
+    /// Scale NV12 frame using pre-computed LUTs.
+    /// Returns false if buffer sizes are insufficient.
+    #[inline]
+    fn scale_nv12(&self, src: &[u8], dst: &mut [u8]) -> bool {
+        let src_y_size = self.src_w * self.src_h;
+        let dst_y_size = self.dst_w * self.dst_h;
+        if src.len() < src_y_size * 3 / 2 || dst.len() < dst_y_size * 3 / 2 {
+            return false;
         }
+
+        let (src_y, src_uv) = src.split_at(src_y_size);
+        let (dst_y, dst_uv) = dst.split_at_mut(dst_y_size);
+
+        // Scale Y plane (luma) - uses LUT for O(1) coordinate lookup
+        for dy in 0..self.dst_h {
+            let sy = self.lut.y_lut[dy];
+            let src_row_start = sy * self.src_w;
+            let dst_row_start = dy * self.dst_w;
+
+            for dx in 0..self.dst_w {
+                let sx = self.lut.x_lut[dx];
+                dst_y[dst_row_start + dx] = src_y[src_row_start + sx];
+            }
+        }
+
+        // Scale UV plane (chroma) - NV12 has interleaved UV at half resolution
+        let dst_uv_h = self.dst_h / 2;
+        for dy in 0..dst_uv_h {
+            let sy = self.lut.uv_y_lut[dy];
+            let src_row_start = sy * self.src_w;
+            let dst_row_start = dy * self.dst_w;
+
+            for dx in 0..self.dst_w {
+                let sx = self.lut.uv_x_lut[dx];
+                dst_uv[dst_row_start + dx] = src_uv[src_row_start + sx];
+            }
+        }
+        true
     }
-    true
 }
 
 struct Active {
@@ -687,6 +759,10 @@ fn apply_loopback_controls(dev: &Device) {
 pub struct V4l2LoopSink {
     path: PathBuf,
     active: Option<Active>,
+    /// Pre-allocated scaling context with LUTs (reused across frames).
+    scale_ctx: Option<ScaleContext>,
+    /// Pre-allocated output buffer for scaled frames (reused across frames).
+    scale_buf: Vec<u8>,
 }
 
 impl V4l2LoopSink {
@@ -694,6 +770,8 @@ impl V4l2LoopSink {
         V4l2LoopSink {
             path: path.into(),
             active: None,
+            scale_ctx: None,
+            scale_buf: Vec::new(),
         }
     }
 }
@@ -725,13 +803,24 @@ impl super::Sink for V4l2LoopSink {
         };
 
         if needs_scaling && frame.format == PixelFormat::Nv12 && neg_fmt == PixelFormat::Nv12 {
-            // Scale NV12 frame to match driver's selected resolution
+            // Fast path: reuse pre-allocated scale context and buffer
             let expected_size = neg_fmt.packed_size(neg_w, neg_h).unwrap_or(0);
-            let mut scaled = Vec::with_capacity(expected_size);
-            scaled.resize(expected_size, 0);
-            if scale_nv12(frame.payload(), &mut scaled, frame.width, frame.height, neg_w, neg_h) {
+
+            // Create or reuse scale context (LUTs are pre-computed once)
+            if self.scale_ctx.is_none() {
+                self.scale_ctx = Some(ScaleContext::new(frame.width, frame.height, neg_w, neg_h));
+            }
+
+            // Grow output buffer if needed (usually only on first frame)
+            if self.scale_buf.len() < expected_size {
+                self.scale_buf.resize(expected_size, 0);
+            }
+
+            // Scale using pre-computed LUTs (no allocations in hot path)
+            let ctx = self.scale_ctx.as_ref().expect("scale_ctx checked above");
+            if ctx.scale_nv12(frame.payload(), &mut self.scale_buf) {
                 let active = self.active.as_mut().expect("active checked above");
-                match active.write(&scaled) {
+                match active.write(&self.scale_buf[..expected_size]) {
                     Ok(()) => Ok(()),
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(e),
                     Err(e) => {
@@ -746,6 +835,7 @@ impl super::Sink for V4l2LoopSink {
                 ))
             }
         } else {
+            // Fast path: no scaling needed, write directly
             let active = self.active.as_mut().expect("active checked above");
             match active.write(frame.payload()) {
                 Ok(()) => Ok(()),
