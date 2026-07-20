@@ -108,15 +108,35 @@ fn run(
     info!("capture thread exit");
 }
 
+/// Soft cap for auto-negotiated capture geometry. Browsers (Chrome/Firefox
+/// WebRTC via PipeWire) frequently fail or refuse 4K virtual cameras; OBS
+/// handles them fine. Users who want more can pass explicit `--width/--height`.
+const AUTO_MAX_WIDTH: u32 = 1920;
+const AUTO_MAX_HEIGHT: u32 = 1080;
+
 /// Acceptable on-the-wire source formats for a given preference, ordered by
 /// desirability. The first entry is the negotiation bias.
+///
+/// Auto prefers uncompressed YUYV when available (zero-copy browser-friendly
+/// path), then MJPEG (typical USB high-res), then NV12.
 fn accept_formats(pref: FormatPref) -> &'static [FrameFormat] {
     match pref {
         FormatPref::Auto => &[FrameFormat::YUYV, FrameFormat::MJPEG, FrameFormat::NV12],
-        FormatPref::Yuy2 => &[FrameFormat::YUYV],
+        FormatPref::Yuy2 => &[FrameFormat::YUYV, FrameFormat::MJPEG],
         FormatPref::Rgb24 => &[FrameFormat::MJPEG, FrameFormat::YUYV, FrameFormat::NV12],
-        FormatPref::Nv12 => &[FrameFormat::NV12],
+        FormatPref::Nv12 => &[FrameFormat::NV12, FrameFormat::MJPEG, FrameFormat::YUYV],
         FormatPref::Mjpeg => &[FrameFormat::MJPEG],
+    }
+}
+
+/// Ranking used only as a tie-break at the same resolution: uncompressed
+/// browser-friendly formats beat MJPEG (which needs a CPU decode).
+fn format_rank(f: FrameFormat) -> u8 {
+    match f {
+        FrameFormat::YUYV => 3,
+        FrameFormat::NV12 => 2,
+        FrameFormat::MJPEG => 1,
+        _ => 0,
     }
 }
 
@@ -125,9 +145,9 @@ fn open_camera(cfg: &ResolvedConfig) -> Result<Camera, NokhwaError> {
 
     let accept = accept_formats(cfg.format);
 
-    // Auto mode: query the camera's real capabilities and pin the highest
-    // resolution it supports (fps as tiebreak). This must use an *exact*
-    // request, otherwise `Closest` may re-pick a smaller mode.
+    // Auto mode: query the camera's real capabilities and pin the best mode
+    // within a browser-friendly resolution budget. Exact request is required
+    // so `Closest` cannot re-pick a smaller mode.
     if cfg.auto_resolution {
         if let Some(cam) = try_open_max_resolution(cfg, accept)? {
             return Ok(cam);
@@ -149,9 +169,10 @@ fn open_camera(cfg: &ResolvedConfig) -> Result<Camera, NokhwaError> {
     Ok(cam)
 }
 
-/// Open the camera, query its supported modes, and pin the highest-resolution
-/// mode among the acceptable formats. Returns `Ok(None)` if the backend cannot
-/// enumerate formats so the caller can fall back to fixed geometry.
+/// Open the camera, query its supported modes, and pin the best mode among the
+/// acceptable formats — preferring ≤1080p for virtual-camera / browser
+/// compatibility. Returns `Ok(None)` if the backend cannot enumerate formats
+/// so the caller can fall back to fixed geometry.
 fn try_open_max_resolution(
     cfg: &ResolvedConfig,
     accept: &[FrameFormat],
@@ -165,23 +186,49 @@ fn try_open_max_resolution(
         _ => return Ok(None),
     };
 
-    // Restrict to formats we can actually serve, then pick the largest frame
-    // (width*height), breaking ties by the highest frame rate.
-    let best = formats
+    let usable: Vec<_> = formats
         .into_iter()
         .filter(|f| accept.contains(&f.format()))
-        .max_by_key(|f| (f.width() as u64 * f.height() as u64, f.frame_rate()));
-
-    let Some(best) = best else {
+        .collect();
+    if usable.is_empty() {
         return Ok(None);
+    }
+
+    // Prefer modes that fit inside 1080p so Chrome/Firefox accept the virtual
+    // device. Only escalate to a larger mode if the camera has nothing smaller.
+    let within_budget: Vec<_> = usable
+        .iter()
+        .filter(|f| f.width() <= AUTO_MAX_WIDTH && f.height() <= AUTO_MAX_HEIGHT)
+        .cloned()
+        .collect();
+    let pool = if within_budget.is_empty() {
+        warn!(
+            "camera has no mode ≤{AUTO_MAX_WIDTH}x{AUTO_MAX_HEIGHT}; using full camera max \
+             (browsers may refuse the virtual device)"
+        );
+        usable
+    } else {
+        within_budget
     };
+
+    // Largest area, then highest fps, then cheapest source format.
+    let best = pool
+        .into_iter()
+        .max_by_key(|f| {
+            (
+                f.width() as u64 * f.height() as u64,
+                f.frame_rate(),
+                format_rank(f.format()),
+            )
+        })
+        .expect("pool non-empty");
 
     info!(
         width = best.width(),
         height = best.height(),
         fps = best.frame_rate(),
         format = ?best.format(),
-        "auto-resolution selected camera max mode"
+        "auto-resolution selected mode"
     );
 
     // Drop the probe handle before reopening with the pinned format so we don't
@@ -268,6 +315,12 @@ fn capture_loop(
 }
 
 /// Convert/copy a raw camera buffer into a pooled frame.
+///
+/// **Wire-format policy for browsers**: Chrome/Firefox WebRTC (and most
+/// PipeWire camera portals) accept YUYV and NV12 from a v4l2loopback device,
+/// but reject RGB24 and often fail on MJPEG loopback. Auto therefore never
+/// emits RGB24 or MJPEG on the virtual camera — it always lands on YUYV/NV12.
+///
 /// Returns `Ok(false)` for source formats we cannot serve.
 fn fill(frame: &mut Frame, raw: &Buffer, pref: FormatPref) -> Result<bool, NokhwaError> {
     let res = raw.resolution();
@@ -281,14 +334,20 @@ fn fill(frame: &mut Frame, raw: &Buffer, pref: FormatPref) -> Result<bool, Nokhw
 
     match raw.source_frame_format() {
         FrameFormat::YUYV => match pref {
-            // Zero-conversion fast path: copy YUY2 verbatim. YUYV is already a
-            // browser-friendly capture format so Auto passes it through.
+            // Zero-conversion fast path: YUYV is the most widely accepted
+            // browser capture format.
             FormatPref::Auto | FormatPref::Yuy2 => {
                 // Guard against malformed/strided buffers from quirky drivers.
                 if PixelFormat::Yuy2.packed_size(w, h) != Some(src.len()) {
                     return Ok(false);
                 }
                 passthrough(frame, PixelFormat::Yuy2)
+            }
+            FormatPref::Nv12 => {
+                // Decode YUYV→RGB→NV12 only when the user forced NV12.
+                if !yuyv_to_nv12(frame, src, w, h) {
+                    return Ok(false);
+                }
             }
             FormatPref::Rgb24 => {
                 let n = w as usize * h as usize * 3;
@@ -297,11 +356,23 @@ fn fill(frame: &mut Frame, raw: &Buffer, pref: FormatPref) -> Result<bool, Nokhw
                 }
                 frame.format = PixelFormat::Rgb24;
             }
-            _ => return Ok(false),
+            FormatPref::Mjpeg => return Ok(false),
         },
         FrameFormat::NV12 => match pref {
-            // NV12 is browser-friendly: Auto passes it straight through.
-            FormatPref::Auto | FormatPref::Nv12 => passthrough(frame, PixelFormat::Nv12),
+            // NV12 is browser-friendly: Auto / Nv12 pass it through.
+            FormatPref::Auto | FormatPref::Nv12 => {
+                if PixelFormat::Nv12.packed_size(w, h) != Some(src.len()) {
+                    return Ok(false);
+                }
+                passthrough(frame, PixelFormat::Nv12)
+            }
+            FormatPref::Yuy2 => {
+                // NV12→YUYV via RGB scratch (rare path).
+                if !decode_plane_to_yuy2(frame, |rgb| convert::nv12_to_rgb24(src, rgb, w, h), w, h)
+                {
+                    return Ok(false);
+                }
+            }
             FormatPref::Rgb24 => {
                 let n = w as usize * h as usize * 3;
                 if !convert::nv12_to_rgb24(src, frame.payload_mut(n), w, h) {
@@ -309,28 +380,50 @@ fn fill(frame: &mut Frame, raw: &Buffer, pref: FormatPref) -> Result<bool, Nokhw
                 }
                 frame.format = PixelFormat::Rgb24;
             }
-            _ => return Ok(false),
+            FormatPref::Mjpeg => return Ok(false),
         },
         FrameFormat::MJPEG => match pref {
+            // Compressed passthrough only when the user explicitly asked for
+            // it — browsers usually cannot open MJPEG loopback devices.
             FormatPref::Mjpeg => passthrough(frame, PixelFormat::Mjpeg),
-            // Auto: decode MJPEG then repack to NV12 so browsers accept the
-            // virtual device (RGB24 is rejected by Chrome/Firefox WebRTC).
-            FormatPref::Auto => {
-                if !decode_mjpeg_to_nv12(frame, raw, w, h)? {
+            // Auto / Nv12: MJPEG → NV12 (half the bandwidth of YUYV, accepted
+            // by Chrome/Firefox). Explicit Yuy2 forces YUYV instead.
+            FormatPref::Auto | FormatPref::Nv12 => {
+                if !decode_mjpeg_to(frame, raw, w, h, PixelFormat::Nv12)? {
                     return Ok(false);
                 }
             }
-            _ => {
+            FormatPref::Yuy2 => {
+                if !decode_mjpeg_to(frame, raw, w, h, PixelFormat::Yuy2)? {
+                    return Ok(false);
+                }
+            }
+            FormatPref::Rgb24 => {
                 let n = w as usize * h as usize * 3;
                 raw.decode_image_to_buffer::<RgbFormat>(frame.payload_mut(n))?;
                 frame.format = PixelFormat::Rgb24;
             }
         },
         other => {
-            debug!(?other, "uncommon source format; attempting RGB decode");
-            let n = w as usize * h as usize * 3;
-            raw.decode_image_to_buffer::<RgbFormat>(frame.payload_mut(n))?;
-            frame.format = PixelFormat::Rgb24;
+            debug!(?other, "uncommon source format; decoding via RGB");
+            match pref {
+                // Keep the virtual cam browser-safe even for exotic sources.
+                FormatPref::Auto | FormatPref::Nv12 => {
+                    if !decode_mjpeg_to(frame, raw, w, h, PixelFormat::Nv12)? {
+                        return Ok(false);
+                    }
+                }
+                FormatPref::Yuy2 => {
+                    if !decode_mjpeg_to(frame, raw, w, h, PixelFormat::Yuy2)? {
+                        return Ok(false);
+                    }
+                }
+                FormatPref::Rgb24 | FormatPref::Mjpeg => {
+                    let n = w as usize * h as usize * 3;
+                    raw.decode_image_to_buffer::<RgbFormat>(frame.payload_mut(n))?;
+                    frame.format = PixelFormat::Rgb24;
+                }
+            }
         }
     }
     Ok(true)
@@ -338,20 +431,24 @@ fn fill(frame: &mut Frame, raw: &Buffer, pref: FormatPref) -> Result<bool, Nokhw
 
 thread_local! {
     /// Scratch RGB24 buffer reused across frames on the capture thread so the
-    /// MJPEG->NV12 path allocates at most once per resolution change.
+    /// MJPEG/NV12 conversion paths allocate at most once per resolution change.
     static RGB_SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Decode an MJPEG buffer to RGB24 (scratch) then repack to NV12 in `frame`.
-/// Returns `Ok(false)` if the geometry is not NV12-compatible (odd dims).
-fn decode_mjpeg_to_nv12(
+/// Decode a compressed/raw buffer to RGB (scratch) then repack to `out_fmt`
+/// (NV12 or YUY2). Reuses [`RGB_SCRATCH`] so steady-state is allocation-free.
+fn decode_mjpeg_to(
     frame: &mut Frame,
     raw: &Buffer,
     w: u32,
     h: u32,
+    out_fmt: PixelFormat,
 ) -> Result<bool, NokhwaError> {
     let rgb_len = w as usize * h as usize * 3;
-    let nv12_len = w as usize * h as usize * 3 / 2;
+    let out_len = match out_fmt.packed_size(w, h) {
+        Some(n) => n,
+        None => return Ok(false),
+    };
 
     RGB_SCRATCH.with(|scratch| {
         let mut scratch = scratch.borrow_mut();
@@ -360,10 +457,70 @@ fn decode_mjpeg_to_nv12(
         }
         raw.decode_image_to_buffer::<RgbFormat>(&mut scratch[..rgb_len])?;
 
-        if !convert::rgb24_to_nv12(&scratch[..rgb_len], frame.payload_mut(nv12_len), w, h) {
+        let ok = match out_fmt {
+            PixelFormat::Nv12 => {
+                convert::rgb24_to_nv12(&scratch[..rgb_len], frame.payload_mut(out_len), w, h)
+            }
+            PixelFormat::Yuy2 => {
+                convert::rgb24_to_yuy2(&scratch[..rgb_len], frame.payload_mut(out_len), w, h)
+            }
+            _ => false,
+        };
+        if !ok {
             return Ok(false);
         }
-        frame.format = PixelFormat::Nv12;
+        frame.format = out_fmt;
         Ok(true)
+    })
+}
+
+/// YUYV → NV12 via a one-shot RGB intermediate (only used for `--format nv12`).
+fn yuyv_to_nv12(frame: &mut Frame, src: &[u8], w: u32, h: u32) -> bool {
+    let rgb_len = w as usize * h as usize * 3;
+    let nv12_len = match PixelFormat::Nv12.packed_size(w, h) {
+        Some(n) => n,
+        None => return false,
+    };
+    RGB_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        if scratch.len() < rgb_len {
+            scratch.resize(rgb_len, 0);
+        }
+        if !convert::yuy2_to_rgb24(src, &mut scratch[..rgb_len], w, h) {
+            return false;
+        }
+        if !convert::rgb24_to_nv12(&scratch[..rgb_len], frame.payload_mut(nv12_len), w, h) {
+            return false;
+        }
+        frame.format = PixelFormat::Nv12;
+        true
+    })
+}
+
+/// Helper: fill RGB via `to_rgb`, then repack to YUY2.
+fn decode_plane_to_yuy2(
+    frame: &mut Frame,
+    to_rgb: impl FnOnce(&mut [u8]) -> bool,
+    w: u32,
+    h: u32,
+) -> bool {
+    let rgb_len = w as usize * h as usize * 3;
+    let yuy2_len = match PixelFormat::Yuy2.packed_size(w, h) {
+        Some(n) => n,
+        None => return false,
+    };
+    RGB_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        if scratch.len() < rgb_len {
+            scratch.resize(rgb_len, 0);
+        }
+        if !to_rgb(&mut scratch[..rgb_len]) {
+            return false;
+        }
+        if !convert::rgb24_to_yuy2(&scratch[..rgb_len], frame.payload_mut(yuy2_len), w, h) {
+            return false;
+        }
+        frame.format = PixelFormat::Yuy2;
+        true
     })
 }

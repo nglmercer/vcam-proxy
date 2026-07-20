@@ -71,10 +71,11 @@ pub fn nv12_to_rgb24(src: &[u8], dst: &mut [u8], width: u32, height: u32) -> boo
 /// Interleaved RGB24 -> semi-planar NV12 (Y plane + interleaved UV plane).
 ///
 /// NV12 is the format browsers (Chrome/Firefox WebRTC) reliably accept from a
-/// V4L2 capture device, and it is half the size of RGB24/YUYV. Chroma is
-/// 4:2:0 subsampled by averaging each 2x2 RGB block. BT.601 studio swing to
-/// match [`pack_px`]'s inverse coefficients.
+/// V4L2 capture device, and it is half the size of RGB24. Chroma is 4:2:0
+/// subsampled by averaging each 2x2 RGB block. BT.601 studio swing to match
+/// [`pack_px`]'s inverse coefficients.
 ///
+/// Single-pass over 2×2 blocks (Y + UV together) for better cache locality.
 /// Returns `false` when buffer sizes are inconsistent with the geometry.
 pub fn rgb24_to_nv12(src: &[u8], dst: &mut [u8], width: u32, height: u32) -> bool {
     let (w, h) = (width as usize, height as usize);
@@ -88,39 +89,81 @@ pub fn rgb24_to_nv12(src: &[u8], dst: &mut [u8], width: u32, height: u32) -> boo
 
     let (y_plane, uv_plane) = dst.split_at_mut(w * h);
 
-    // Luma for every pixel.
-    for row in 0..h {
-        for col in 0..w {
-            let s = (row * w + col) * 3;
-            let (r, g, b) = (src[s] as i32, src[s + 1] as i32, src[s + 2] as i32);
-            // BT.601: Y = 16 + (66R + 129G + 25B) / 256
-            let y = 16 + ((66 * r + 129 * g + 25 * b + 128) >> 8);
-            y_plane[row * w + col] = y.clamp(0, 255) as u8;
-        }
-    }
-
-    // Chroma: one U/V pair per 2x2 block, averaged.
+    // One pass: write four luma samples and one UV pair per 2×2 block.
     for by in (0..h).step_by(2) {
+        let y_row0 = by * w;
+        let y_row1 = y_row0 + w;
+        let src_row0 = by * w * 3;
+        let src_row1 = src_row0 + w * 3;
+        let uv_row = (by / 2) * w;
+
         for bx in (0..w).step_by(2) {
-            let mut rs = 0i32;
-            let mut gs = 0i32;
-            let mut bs = 0i32;
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let s = ((by + dy) * w + (bx + dx)) * 3;
-                    rs += src[s] as i32;
-                    gs += src[s + 1] as i32;
-                    bs += src[s + 2] as i32;
-                }
-            }
-            let (r, g, b) = (rs / 4, gs / 4, bs / 4);
+            let s00 = src_row0 + bx * 3;
+            let s01 = s00 + 3;
+            let s10 = src_row1 + bx * 3;
+            let s11 = s10 + 3;
+
+            let (r00, g00, b00) = (src[s00] as i32, src[s00 + 1] as i32, src[s00 + 2] as i32);
+            let (r01, g01, b01) = (src[s01] as i32, src[s01 + 1] as i32, src[s01 + 2] as i32);
+            let (r10, g10, b10) = (src[s10] as i32, src[s10 + 1] as i32, src[s10 + 2] as i32);
+            let (r11, g11, b11) = (src[s11] as i32, src[s11 + 1] as i32, src[s11 + 2] as i32);
+
+            // BT.601: Y = 16 + (66R + 129G + 25B) / 256
+            y_plane[y_row0 + bx] = (16 + ((66 * r00 + 129 * g00 + 25 * b00 + 128) >> 8)).clamp(0, 255) as u8;
+            y_plane[y_row0 + bx + 1] =
+                (16 + ((66 * r01 + 129 * g01 + 25 * b01 + 128) >> 8)).clamp(0, 255) as u8;
+            y_plane[y_row1 + bx] = (16 + ((66 * r10 + 129 * g10 + 25 * b10 + 128) >> 8)).clamp(0, 255) as u8;
+            y_plane[y_row1 + bx + 1] =
+                (16 + ((66 * r11 + 129 * g11 + 25 * b11 + 128) >> 8)).clamp(0, 255) as u8;
+
+            let r = (r00 + r01 + r10 + r11) / 4;
+            let g = (g00 + g01 + g10 + g11) / 4;
+            let b = (b00 + b01 + b10 + b11) / 4;
             // BT.601: U = 128 + (-38R - 74G + 112B) / 256
             //         V = 128 + (112R - 94G - 18B) / 256
             let u = 128 + ((-38 * r - 74 * g + 112 * b + 128) >> 8);
             let v = 128 + ((112 * r - 94 * g - 18 * b + 128) >> 8);
-            let uv = (by / 2) * w + bx; // bx is even -> UV pair index
+            let uv = uv_row + bx;
             uv_plane[uv] = u.clamp(0, 255) as u8;
             uv_plane[uv + 1] = v.clamp(0, 255) as u8;
+        }
+    }
+    true
+}
+
+/// Interleaved RGB24 -> packed YUY2 (`Y0 U0 Y1 V0`).
+///
+/// Used when the user forces `--format yuy2` but the camera only delivers
+/// MJPEG/RGB. Even dimensions required (2-pixel YUY2 pairs).
+pub fn rgb24_to_yuy2(src: &[u8], dst: &mut [u8], width: u32, height: u32) -> bool {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 || w % 2 != 0 {
+        return false;
+    }
+    if src.len() < w * h * 3 || dst.len() < w * h * 2 {
+        return false;
+    }
+
+    for row in 0..h {
+        for col in (0..w).step_by(2) {
+            let s0 = (row * w + col) * 3;
+            let s1 = s0 + 3;
+            let (r0, g0, b0) = (src[s0] as i32, src[s0 + 1] as i32, src[s0 + 2] as i32);
+            let (r1, g1, b1) = (src[s1] as i32, src[s1 + 1] as i32, src[s1 + 2] as i32);
+
+            let y0 = 16 + ((66 * r0 + 129 * g0 + 25 * b0 + 128) >> 8);
+            let y1 = 16 + ((66 * r1 + 129 * g1 + 25 * b1 + 128) >> 8);
+            let r = (r0 + r1) / 2;
+            let g = (g0 + g1) / 2;
+            let b = (b0 + b1) / 2;
+            let u = 128 + ((-38 * r - 74 * g + 112 * b + 128) >> 8);
+            let v = 128 + ((112 * r - 94 * g - 18 * b + 128) >> 8);
+
+            let d = (row * w + col) * 2;
+            dst[d] = y0.clamp(0, 255) as u8;
+            dst[d + 1] = u.clamp(0, 255) as u8;
+            dst[d + 2] = y1.clamp(0, 255) as u8;
+            dst[d + 3] = v.clamp(0, 255) as u8;
         }
     }
     true

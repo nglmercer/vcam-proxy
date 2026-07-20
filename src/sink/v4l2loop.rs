@@ -20,6 +20,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 use v4l::buffer::Type;
 use v4l::capability::Flags;
+use v4l::control::{Control, Value as CtrlValue};
 use v4l::device::Device;
 use v4l::format::FourCC;
 use v4l::io::mmap::Stream as MmapStream;
@@ -184,12 +185,26 @@ pub fn ensure_module_loaded_with_install(params: &str) -> Result<(), ModuleError
     load_module_with_params(params)
 }
 
-/// Kernel buffers requested from the loopback driver.
+/// Kernel buffers requested from the loopback driver. More buffers help when
+/// multiple readers (OBS + browser) drain at slightly different rates.
 const NUM_KBUF: u32 = 4;
 /// Bound on QBUF/DQBUF waits so the thread stays responsive to shutdown and
 /// to a missing consumer (v4l2loopback only drains output buffers while a
 /// reader is attached).
 const POLL_TIMEOUT_MS: u64 = 500;
+
+/// v4l2loopback private control IDs (V4L2_CID_USER_BASE + offsets used by the
+/// driver). Setting these makes the virtual camera look like a real UVC device
+/// to Chrome/Firefox even between consumer attach/detach cycles.
+const CID_KEEP_FORMAT: u32 = 0x0098_f900;
+const CID_SUSTAIN_FRAMERATE: u32 = 0x0098_f901;
+const CID_TIMEOUT: u32 = 0x0098_f902;
+
+/// True when the driver string is v4l2loopback (kernel reports either spelling).
+#[inline]
+fn is_loopback_driver(driver: &str) -> bool {
+    driver == "v4l2 loopback" || driver == "v4l2loopback"
+}
 
 // ---------------------------------------------------------------------------
 // Device discovery & validation
@@ -220,8 +235,11 @@ impl std::fmt::Display for LoopbackDevice {
     }
 }
 
-/// Scan /dev/video* for all devices supporting VIDEO_OUTPUT capability.
-/// Returns them sorted by path name for deterministic ordering.
+/// Scan /dev/video* for loopback devices and other VIDEO_OUTPUT nodes.
+///
+/// With `exclusive_caps=1` an idle v4l2loopback node only advertises
+/// `VIDEO_CAPTURE` (so browsers see a camera). We still list it by driver
+/// name so discovery works before the producer opens the device.
 pub fn discover_loopback_devices() -> io::Result<Vec<LoopbackDevice>> {
     let mut devices = Vec::new();
 
@@ -234,7 +252,7 @@ pub fn discover_loopback_devices() -> io::Result<Vec<LoopbackDevice>> {
         };
         let path = PathBuf::from(format!("/dev/{}", name));
 
-        if let Some(dev) = probe_output_device(&path) {
+        if let Some(dev) = probe_loopback_candidate(&path) {
             devices.push(dev);
         }
     }
@@ -243,14 +261,16 @@ pub fn discover_loopback_devices() -> io::Result<Vec<LoopbackDevice>> {
     Ok(devices)
 }
 
-/// Probe a single device path; returns Some(LoopbackDevice) if it supports
-/// video output, None if it cannot be opened or lacks the capability.
-fn probe_output_device(path: &Path) -> Option<LoopbackDevice> {
+/// Probe a single device path. Accepts:
+/// - any v4l2loopback node (by driver name), regardless of current caps mask
+/// - any other device that currently advertises `VIDEO_OUTPUT`
+fn probe_loopback_candidate(path: &Path) -> Option<LoopbackDevice> {
     let dev = Device::with_path(path).ok()?;
     let caps = dev.query_caps().ok()?;
 
-    // Must advertise video output capability
-    if !caps.capabilities.contains(Flags::VIDEO_OUTPUT) {
+    let loopback = is_loopback_driver(&caps.driver);
+    let has_output = caps.capabilities.contains(Flags::VIDEO_OUTPUT);
+    if !loopback && !has_output {
         return None;
     }
 
@@ -268,28 +288,30 @@ fn probe_output_device(path: &Path) -> Option<LoopbackDevice> {
 /// Discover the best loopback device for output.
 ///
 /// Priority:
-/// 1. `preferred` path if it exists and supports VIDEO_OUTPUT
+/// 1. `preferred` path if it exists and is a usable loopback/output node
 /// 2. First v4l2loopback device found by scanning
 /// 3. Any VIDEO_OUTPUT device if no v4l2loopback found
 pub fn find_loopback_device(preferred: &Path) -> Result<PathBuf, LoopbackError> {
     // 1. Try preferred device first
     if preferred.exists() {
-        if let Some(dev) = probe_output_device(preferred) {
+        if let Some(dev) = probe_loopback_candidate(preferred) {
             info!(device = %dev.path.display(), card = %dev.card, "using preferred loopback device");
             return Ok(dev.path);
         }
-        warn!(path = %preferred.display(), "preferred device does not support video output; scanning for alternatives");
+        warn!(
+            path = %preferred.display(),
+            "preferred device is not a loopback/output node; scanning for alternatives"
+        );
     }
 
     // 2. Scan all /dev/video* for loopback devices
     let all_devices =
         discover_loopback_devices().map_err(|e| LoopbackError::ScanFailed { source: e })?;
 
-    // 3. Prefer v4l2loopback devices
-    // Note: the kernel driver name may be "v4l2 loopback" (with space) depending on version.
+    // 3. Prefer v4l2loopback devices (driver name may include a space).
     let loopback_devices: Vec<_> = all_devices
         .iter()
-        .filter(|d| d.driver == "v4l2 loopback" || d.driver == "v4l2loopback")
+        .filter(|d| is_loopback_driver(&d.driver))
         .cloned()
         .collect();
 
@@ -309,6 +331,19 @@ pub fn find_loopback_device(preferred: &Path) -> Result<PathBuf, LoopbackError> 
 
     // 5. Nothing available
     Err(LoopbackError::NoDeviceFound)
+}
+
+/// Read `/sys/module/v4l2loopback/parameters/exclusive_caps` and return whether
+/// the first device has exclusive_caps enabled. `None` if the module is not
+/// loaded or the sysfs node is unreadable.
+///
+/// Browsers refuse devices that advertise both CAPTURE and OUTPUT; exclusive
+/// caps is what makes the virtual node look like a real webcam.
+pub fn exclusive_caps_active() -> Option<bool> {
+    let raw = fs::read_to_string("/sys/module/v4l2loopback/parameters/exclusive_caps").ok()?;
+    // Format is "Y,N,N,..." or "1,0,0,..." depending on kernel/module version.
+    let first = raw.split(',').next()?.trim();
+    Some(matches!(first, "Y" | "y" | "1"))
 }
 
 // ---------------------------------------------------------------------------
@@ -480,7 +515,18 @@ impl Active {
 
         if let Ok(caps) = dev.query_caps() {
             info!(driver = %caps.driver, card = %caps.card, bus = %caps.bus, "output device");
+            if !is_loopback_driver(&caps.driver) {
+                warn!(
+                    driver = %caps.driver,
+                    "device is not v4l2loopback; browsers may not list it as a camera"
+                );
+            }
         }
+
+        // Pin the negotiated format and sustain a steady frame clock so
+        // consumers (especially browsers via PipeWire) always see a stable
+        // UVC-like capture device even when no reader is currently attached.
+        apply_loopback_controls(&dev);
 
         let want = Format::new(width, height, FourCC::new(&fmt.fourcc()));
         let actual = Output::set_format(&dev, &want)?;
@@ -493,7 +539,13 @@ impl Active {
                 ),
             ));
         }
-        debug!(sizeimage = actual.size, "format negotiated");
+        info!(
+            width = actual.width,
+            height = actual.height,
+            fourcc = %actual.fourcc,
+            sizeimage = actual.size,
+            "loopback format negotiated (visible to browsers as capture)"
+        );
 
         let mut stream = MmapStream::with_buffers(&dev, Type::VideoOutput, NUM_KBUF)?;
         stream.set_timeout(Duration::from_millis(POLL_TIMEOUT_MS));
@@ -548,6 +600,28 @@ impl Active {
         buf[..payload.len()].copy_from_slice(payload);
         meta.bytesused = payload.len() as u32;
         Ok(())
+    }
+}
+
+/// Enable keep_format + sustain_framerate so the virtual camera keeps advertising
+/// a fixed format to CAPTURE clients (Chrome, Firefox, Zoom) between attaches.
+fn apply_loopback_controls(dev: &Device) {
+    // Best-effort: older module builds may lack these controls.
+    for (id, name, value) in [
+        (CID_KEEP_FORMAT, "keep_format", CtrlValue::Boolean(true)),
+        (
+            CID_SUSTAIN_FRAMERATE,
+            "sustain_framerate",
+            CtrlValue::Boolean(true),
+        ),
+        // Hold the last frame for ~3s if the producer hiccups so getUserMedia
+        // does not immediately fail with a black/timeout stream.
+        (CID_TIMEOUT, "timeout", CtrlValue::Integer(3000)),
+    ] {
+        match dev.set_control(Control { id, value }) {
+            Ok(()) => debug!(control = name, "loopback control set"),
+            Err(e) => debug!(control = name, error = %e, "loopback control not set"),
+        }
     }
 }
 
