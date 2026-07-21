@@ -113,3 +113,14 @@ pub fn all_loopback_user_pids() -> Vec<DeviceUser> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_users_of_missing_node_is_empty_and_safe() {
+        // A non-existent device matches no fd symlink and must not panic.
+        assert!(device_users(Path::new("/dev/definitely-not-a-camera")).is_empty());
+    }
+}

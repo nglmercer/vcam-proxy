@@ -546,24 +546,5 @@ impl eframe::App for App {
 
 /// Convenience: convert a `Settings` into a `ResolvedConfig` for seeding.
 pub fn settings_to_resolved(s: &Settings) -> ResolvedConfig {
-    ResolvedConfig {
-        camera: s.camera,
-        sink: SinkKind::Auto,
-        device: s.device.clone(),
-        pipe_name: "vcam_proxy_0".to_string(),
-        width: s.width,
-        height: s.height,
-        fps: s.fps,
-        format: s.format,
-        buffers: s.buffers,
-        retry_ms: s.retry_ms,
-        multi_reader: s.multi_reader,
-        devices: s.devices,
-        exclusive_caps: s.exclusive_caps,
-        timeout: s.timeout,
-        auto_load_module: s.auto_load_module,
-        auto_resolution: s.auto_resolution,
-        image: s.image.clone(),
-        multi_app_timeout: s.multi_app_timeout,
-    }
+    ResolvedConfig::from_settings(s)
 }
